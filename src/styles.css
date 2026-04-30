@@ -1,0 +1,234 @@
+:root {
+  color: #f7f7f7;
+  background: transparent;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.panel {
+  width: min(760px, calc(100vw - 24px));
+  margin: 12px auto;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 18px;
+  background: rgb(24 24 28 / 92%);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 46%);
+  backdrop-filter: blur(28px);
+}
+
+.search-row {
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgb(255 255 255 / 10%);
+}
+
+.permission {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgb(255 255 255 / 10%);
+  color: #2b2100;
+  background: #ffd86b;
+  font-size: 13px;
+}
+
+.permission.hidden {
+  display: none;
+}
+
+.permission button {
+  border-color: rgb(43 33 0 / 14%);
+  color: #2b2100;
+  background: rgb(255 255 255 / 32%);
+}
+
+.search-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  color: #a8a8b3;
+  background: rgb(255 255 255 / 8%);
+}
+
+#search {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  color: inherit;
+  background: transparent;
+  font-size: 22px;
+}
+
+#search::placeholder {
+  color: #777784;
+}
+
+button {
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 8px;
+  color: #e8e8ed;
+  background: rgb(255 255 255 / 8%);
+  cursor: pointer;
+}
+
+button:hover {
+  background: rgb(255 255 255 / 14%);
+}
+
+#settings-toggle {
+  padding: 7px 10px;
+  color: #c9c9d1;
+}
+
+.clip-list {
+  max-height: 520px;
+  padding: 8px;
+  margin: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.clip {
+  display: grid;
+  grid-template-columns: 28px 48px minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 62px;
+  padding: 9px 10px;
+  border-radius: 12px;
+}
+
+.clip.selected {
+  background: rgb(72 125 255 / 28%);
+}
+
+.clip-number {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 7px;
+  color: #d6d6dd;
+  background: rgb(255 255 255 / 10%);
+  font-size: 13px;
+}
+
+.clip-kind {
+  display: grid;
+  height: 34px;
+  place-items: center;
+  border-radius: 9px;
+  color: #101014;
+  background: #f0f0f5;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.clip-body {
+  min-width: 0;
+}
+
+.clip-body strong,
+.clip-body small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clip-body strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.clip-body small {
+  margin-top: 3px;
+  color: #a6a6b0;
+  font-size: 12px;
+}
+
+.clip .pin,
+.clip .delete {
+  padding: 6px 8px;
+  opacity: 0;
+}
+
+.clip:hover .pin,
+.clip:hover .delete,
+.clip.selected .pin,
+.clip.selected .delete {
+  opacity: 1;
+}
+
+.settings {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px 16px;
+  border-top: 1px solid rgb(255 255 255 / 10%);
+  background: rgb(0 0 0 / 16%);
+}
+
+.settings.hidden {
+  display: none;
+}
+
+.settings label {
+  display: grid;
+  gap: 6px;
+  color: #c5c5ce;
+  font-size: 13px;
+}
+
+.settings input[type="number"] {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 8px;
+  color: #f7f7f7;
+  background: rgb(255 255 255 / 8%);
+}
+
+.settings .checkbox {
+  display: flex;
+  align-items: center;
+}
+
+.settings button[type="submit"] {
+  justify-self: end;
+  padding: 8px 12px;
+}
+
+.empty-state {
+  padding: 36px 16px;
+  color: #a6a6b0;
+  text-align: center;
+}
