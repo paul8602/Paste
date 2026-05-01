@@ -36,7 +36,7 @@ jobs:
         run: |
           APP_BINARY="src-tauri/target/universal-apple-darwin/release/bundle/macos/Paste.app/Contents/MacOS/paste"
           lipo -info "$APP_BINARY"
-          lipo -verify_arch x86_64 arm64 "$APP_BINARY"
+          lipo "$APP_BINARY" -verify_arch x86_64 arm64
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
