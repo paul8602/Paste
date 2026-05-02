@@ -4,7 +4,7 @@ use windows::Win32::Foundation::{HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
-use windows::Win32::UI::Shell::DragQueryFileW;
+use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
 #[link(name = "user32")]
 extern "system" {
@@ -35,7 +35,7 @@ impl ClipboardBridge {
             // Priority 1: File drop (CF_HDROP)
             if let Ok(handle) = unsafe { GetClipboardData(CF_HDROP) } {
                 if !handle.is_invalid() {
-                    let drop = handle.0;
+                    let drop = HDROP(handle.0);
                     let count = unsafe { DragQueryFileW(drop, 0xFFFFFFFF, None) };
                     if count > 0 {
                         let mut paths = Vec::new();
