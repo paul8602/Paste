@@ -4,5 +4,6 @@ src-tauri/target
 src-tauri/gen
 src-tauri/icons/AppIcon.iconset
 .cursor
+.idea
 .DS_Store
 *.log

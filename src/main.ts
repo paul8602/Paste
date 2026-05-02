@@ -84,6 +84,12 @@ function clipIcon(kind: ClipSummary["kind"]): string {
   }
 }
 
+function updateSelection(oldIndex: number, newIndex: number): void {
+  const items = list.querySelectorAll<HTMLElement>(".clip");
+  items[oldIndex]?.classList.remove("selected");
+  items[newIndex]?.classList.add("selected");
+}
+
 function renderClips(): void {
   list.innerHTML = "";
 
@@ -113,8 +119,10 @@ function renderClips(): void {
     `;
 
     item.addEventListener("mousemove", () => {
-      selectedIndex = index;
-      renderClips();
+      if (selectedIndex !== index) {
+        selectedIndex = index;
+        renderClips();
+      }
     });
     item.addEventListener("dblclick", () => chooseClip(index));
     item.querySelector<HTMLButtonElement>(".pin")?.addEventListener("click", async (event) => {
@@ -167,10 +175,14 @@ function renderSettings(): void {
   trimDedupInput.checked = settings.trimWhitespaceForTextDedup;
 }
 
-searchInput.addEventListener("input", async () => {
-  query = searchInput.value;
-  selectedIndex = 0;
-  await refresh();
+let searchDebounce: ReturnType<typeof setTimeout>;
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(async () => {
+    query = searchInput.value;
+    selectedIndex = 0;
+    await refresh();
+  }, 150);
 });
 
 settingsToggle.addEventListener("click", () => {
@@ -200,15 +212,21 @@ document.addEventListener("keydown", async (event) => {
 
   if (event.key === "ArrowDown") {
     event.preventDefault();
-    selectedIndex = Math.min(selectedIndex + 1, clips.length - 1);
-    renderClips();
+    const newIndex = Math.min(selectedIndex + 1, clips.length - 1);
+    if (newIndex !== selectedIndex) {
+      updateSelection(selectedIndex, newIndex);
+      selectedIndex = newIndex;
+    }
     return;
   }
 
   if (event.key === "ArrowUp") {
     event.preventDefault();
-    selectedIndex = Math.max(selectedIndex - 1, 0);
-    renderClips();
+    const newIndex = Math.max(selectedIndex - 1, 0);
+    if (newIndex !== selectedIndex) {
+      updateSelection(selectedIndex, newIndex);
+      selectedIndex = newIndex;
+    }
     return;
   }
 

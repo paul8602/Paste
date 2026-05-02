@@ -361,17 +361,17 @@ impl HistoryStore {
     }
 
     fn prune(&self, max_items: usize) -> rusqlite::Result<()> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "
             SELECT id
             FROM clips
             WHERE is_pinned = 0
-            ORDER BY created_at DESC
-            LIMIT -1 OFFSET ?1
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT -1 OFFSET {max_items}
             ",
-        )?;
+        ))?;
         let stale_ids = stmt
-            .query_map(params![max_items as i64], |row| row.get::<_, String>(0))?
+            .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         for id in stale_ids {
@@ -382,15 +382,15 @@ impl HistoryStore {
     }
 
     fn delete_blob_files(&self, id: &str) -> rusqlite::Result<()> {
-        if !self.blobs_dir.exists() {
-            return Ok(());
-        }
+        let mut stmt = self.conn.prepare(
+            "SELECT value FROM payloads WHERE clip_id = ?1 AND storage = 'blob'",
+        )?;
+        let filenames: Vec<String> = stmt
+            .query_map(params![id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        for entry in fs::read_dir(&self.blobs_dir).map_err(to_sql_error)? {
-            let entry = entry.map_err(to_sql_error)?;
-            if entry.file_name().to_string_lossy().starts_with(id) {
-                let _ = fs::remove_file(entry.path());
-            }
+        for filename in filenames {
+            let _ = fs::remove_file(self.blobs_dir.join(filename));
         }
         Ok(())
     }
@@ -428,4 +428,144 @@ fn sanitize_uti(value: &str) -> String {
 
 fn to_sql_error(error: std::io::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::macos_bridge::ClipboardPayload;
+
+    fn temp_store() -> (HistoryStore, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("paste-test-{}", Uuid::new_v4()));
+        let store = HistoryStore::new(dir.clone()).expect("failed to create temp store");
+        (store, dir)
+    }
+
+    fn cleanup(dir: &PathBuf) {
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn text_item(text: &str) -> ClipboardItem {
+        ClipboardItem {
+            kind: ClipKind::Text,
+            text_preview: text.to_string(),
+            payloads: vec![ClipboardPayload {
+                uti: "public.utf8-plain-text".to_string(),
+                data: text.as_bytes().to_vec(),
+            }],
+        }
+    }
+
+    fn text_item_with_data(text: &str, data: &str) -> ClipboardItem {
+        ClipboardItem {
+            kind: ClipKind::Text,
+            text_preview: text.to_string(),
+            payloads: vec![ClipboardPayload {
+                uti: "public.utf8-plain-text".to_string(),
+                data: data.as_bytes().to_vec(),
+            }],
+        }
+    }
+
+    #[test]
+    fn insert_and_search_text() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("hello world")).unwrap();
+        store.insert_clip(text_item("foo bar")).unwrap();
+
+        let results = store.search("", 10).unwrap();
+        assert_eq!(results.len(), 2);
+
+        let results = store.search("hello", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].text_preview, "hello world");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn duplicate_hash_upserts() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("same content")).unwrap();
+        store.insert_clip(text_item("same content")).unwrap();
+
+        let results = store.search("", 10).unwrap();
+        assert_eq!(results.len(), 1);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn delete_clip() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("to delete")).unwrap();
+
+        let results = store.search("", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        let id = results[0].id.clone();
+
+        store.delete_clip(&id).unwrap();
+        let results = store.search("", 10).unwrap();
+        assert_eq!(results.len(), 0);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn pin_clip() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("pinned item")).unwrap();
+
+        let results = store.search("", 10).unwrap();
+        let id = results[0].id.clone();
+        assert!(!results[0].is_pinned);
+
+        store.pin_clip(&id, true).unwrap();
+        let results = store.search("", 10).unwrap();
+        assert!(results[0].is_pinned);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn prune_removes_old_items() {
+        let (store, dir) = temp_store();
+
+        // max_items minimum is 50 (enforced by save_settings clamp)
+        store
+            .save_settings(AppSettings {
+                max_items: 50,
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Insert 60 items
+        for i in 0..60 {
+            store
+                .insert_clip(text_item_with_data("item", &format!("data-{i}")))
+                .unwrap();
+        }
+
+        let results = store.search("", 100).unwrap();
+        assert_eq!(results.len(), 50, "expected 50 items, got {}", results.len());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn settings_roundtrip() {
+        let (store, dir) = temp_store();
+        let settings = AppSettings {
+            max_items: 500,
+            max_payload_bytes: 10 * 1024 * 1024,
+            trim_whitespace_for_text_dedup: false,
+        };
+        store.save_settings(settings).unwrap();
+        let loaded = store.get_settings().unwrap();
+        assert_eq!(loaded.max_items, 500);
+        assert_eq!(loaded.max_payload_bytes, 10 * 1024 * 1024);
+        assert!(!loaded.trim_whitespace_for_text_dedup);
+
+        cleanup(&dir);
+    }
 }

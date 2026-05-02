@@ -3,12 +3,15 @@ mod macos_bridge;
 mod search;
 
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+static PASTE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
 use history::{AppSettings, ClipSummary, HistoryStore};
-use macos_bridge::{ClipboardBridge, ClipboardItem};
+use macos_bridge::ClipboardBridge;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -34,10 +37,13 @@ fn paste_clip(state: tauri::State<'_, AppState>, app: AppHandle, id: String) -> 
         store.get_clip(&id).map_err(|error| error.to_string())?
     };
 
+    PASTE_IN_PROGRESS.store(true, Ordering::SeqCst);
     state.bridge.write_clip(&clip).map_err(|error| error.to_string())?;
     hide_panel(app)?;
     thread::sleep(Duration::from_millis(80));
-    state.bridge.send_paste_keystroke().map_err(|error| error.to_string())
+    let result = state.bridge.send_paste_keystroke().map_err(|error| error.to_string());
+    PASTE_IN_PROGRESS.store(false, Ordering::SeqCst);
+    result
 }
 
 #[tauri::command]
@@ -117,7 +123,7 @@ fn start_clipboard_watcher(app: AppHandle, store: Arc<Mutex<HistoryStore>>, brid
                 continue;
             };
 
-            if is_self_generated_item(&item) {
+            if PASTE_IN_PROGRESS.load(Ordering::SeqCst) {
                 continue;
             }
 
@@ -132,10 +138,6 @@ fn start_clipboard_watcher(app: AppHandle, store: Arc<Mutex<HistoryStore>>, brid
             }
         }
     });
-}
-
-fn is_self_generated_item(_item: &ClipboardItem) -> bool {
-    false
 }
 
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
