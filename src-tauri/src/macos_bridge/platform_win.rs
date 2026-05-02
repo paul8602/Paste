@@ -1,7 +1,8 @@
 use super::{Clip, ClipboardItem, ClipboardPayload};
 use crate::history::ClipKind;
+use windows::Win32::Foundation::{HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData};
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::DragQueryFileW;
 
@@ -34,7 +35,7 @@ impl ClipboardBridge {
             // Priority 1: File drop (CF_HDROP)
             if let Ok(handle) = unsafe { GetClipboardData(CF_HDROP) } {
                 if !handle.is_invalid() {
-                    let drop = handle.0 as *mut std::ffi::c_void;
+                    let drop = handle.0;
                     let count = unsafe { DragQueryFileW(drop, 0xFFFFFFFF, None) };
                     if count > 0 {
                         let mut paths = Vec::new();
@@ -62,11 +63,12 @@ impl ClipboardBridge {
             // Priority 2: Image (CF_DIB)
             if let Ok(handle) = unsafe { GetClipboardData(CF_DIB) } {
                 if !handle.is_invalid() {
-                    let ptr = unsafe { GlobalLock(handle.0 as *mut std::ffi::c_void) };
+                    let hglobal = HGLOBAL(handle.0);
+                    let ptr = unsafe { GlobalLock(hglobal) };
                     if !ptr.is_null() {
-                        let size = unsafe { windows::Win32::System::Memory::GlobalSize(handle.0 as *mut std::ffi::c_void) };
+                        let size = unsafe { GlobalSize(hglobal) };
                         let data = unsafe { std::slice::from_raw_parts(ptr as *const u8, size) }.to_vec();
-                        unsafe { GlobalUnlock(handle.0 as *mut std::ffi::c_void); }
+                        unsafe { let _ = GlobalUnlock(hglobal); }
                         return Ok(Some(ClipboardItem {
                             kind: ClipKind::Image,
                             text_preview: "[Image]".to_string(),
@@ -82,7 +84,8 @@ impl ClipboardBridge {
             // Priority 3: Unicode text (CF_UNICODETEXT)
             if let Ok(handle) = unsafe { GetClipboardData(CF_UNICODETEXT) } {
                 if !handle.is_invalid() {
-                    let ptr = unsafe { GlobalLock(handle.0 as *mut std::ffi::c_void) };
+                    let hglobal = HGLOBAL(handle.0);
+                    let ptr = unsafe { GlobalLock(hglobal) };
                     if !ptr.is_null() {
                         let mut end = 0;
                         let p = ptr as *const u16;
@@ -91,7 +94,7 @@ impl ClipboardBridge {
                         }
                         let wchars = unsafe { std::slice::from_raw_parts(p, end) };
                         let text = String::from_utf16_lossy(wchars);
-                        unsafe { GlobalUnlock(handle.0 as *mut std::ffi::c_void); }
+                        unsafe { let _ = GlobalUnlock(hglobal); }
                         let preview = summarize_text(&text);
                         return Ok(Some(ClipboardItem {
                             kind: ClipKind::Text,
@@ -129,14 +132,14 @@ impl ClipboardBridge {
                 unsafe {
                     let hmem = GlobalAlloc(GMEM_MOVEABLE, size)
                         .map_err(|e| format!("GlobalAlloc failed: {e}"))?;
-                    let ptr = GlobalLock(hmem.0 as *mut std::ffi::c_void);
+                    let ptr = GlobalLock(hmem);
                     if ptr.is_null() {
-                        unsafe { let _ = CloseClipboard(); }
+                        let _ = CloseClipboard();
                         return Err("GlobalLock failed".to_string());
                     }
                     std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr as *mut u16, utf16.len());
-                    GlobalUnlock(hmem.0 as *mut std::ffi::c_void);
-                    SetClipboardData(CF_UNICODETEXT, Some(hmem))
+                    let _ = GlobalUnlock(hmem);
+                    SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0)))
                         .map_err(|e| format!("SetClipboardData failed: {e}"))?;
                 }
             } else {
@@ -144,19 +147,19 @@ impl ClipboardBridge {
                 unsafe {
                     let hmem = GlobalAlloc(GMEM_MOVEABLE, data.len())
                         .map_err(|e| format!("GlobalAlloc failed: {e}"))?;
-                    let ptr = GlobalLock(hmem.0 as *mut std::ffi::c_void);
+                    let ptr = GlobalLock(hmem);
                     if ptr.is_null() {
                         let _ = CloseClipboard();
                         return Err("GlobalLock failed".to_string());
                     }
                     std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-                    GlobalUnlock(hmem.0 as *mut std::ffi::c_void);
+                    let _ = GlobalUnlock(hmem);
                     let cf = if payload.uti.contains("image") || payload.uti.contains("bmp") {
                         CF_DIB
                     } else {
                         CF_UNICODETEXT
                     };
-                    SetClipboardData(cf, Some(hmem))
+                    SetClipboardData(cf, Some(HANDLE(hmem.0)))
                         .map_err(|e| format!("SetClipboardData failed: {e}"))?;
                 }
             }
@@ -251,7 +254,7 @@ mod tests {
     fn summarize_truncates_long_text() {
         let long = "a".repeat(200);
         let result = summarize_text(&long);
-        assert_eq!(result.len(), 163); // 160 + "..."
+        assert_eq!(result.len(), 163);
         assert!(result.ends_with("..."));
     }
 
