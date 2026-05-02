@@ -2,7 +2,6 @@ mod history;
 mod macos_bridge;
 mod search;
 
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -79,7 +78,7 @@ fn has_accessibility_permission(state: tauri::State<'_, AppState>) -> bool {
 fn open_accessibility_settings() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
+        std::process::Command::new("open")
             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
             .status()
             .map_err(|error| format!("failed to open Accessibility settings: {error}"))?;

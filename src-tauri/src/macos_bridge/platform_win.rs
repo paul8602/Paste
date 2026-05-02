@@ -180,7 +180,6 @@ impl ClipboardBridge {
                 Anonymous: INPUT_0 {
                     ki: KEYBDINPUT {
                         wVk: VK_CONTROL,
-                        dwFlags: KEYEVENTF_KEYDOWN,
                         ..Default::default()
                     },
                 },
@@ -190,7 +189,6 @@ impl ClipboardBridge {
                 Anonymous: INPUT_0 {
                     ki: KEYBDINPUT {
                         wVk: VK_V,
-                        dwFlags: KEYEVENTF_KEYDOWN,
                         ..Default::default()
                     },
                 },
