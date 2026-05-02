@@ -11,7 +11,8 @@
     "tauri:build": "tauri build",
     "tauri:build:x64": "tauri build --target x86_64-apple-darwin",
     "tauri:build:arm64": "tauri build --target aarch64-apple-darwin",
-    "tauri:build:universal": "tauri build --target universal-apple-darwin"
+    "tauri:build:universal": "tauri build --target universal-apple-darwin",
+    "tauri:build:win": "tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1"

@@ -28,7 +28,10 @@ pub struct ClipboardItem {
 #[cfg(target_os = "macos")]
 mod platform;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+mod platform_win;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod platform {
     use super::{Clip, ClipboardItem};
 
@@ -48,7 +51,7 @@ mod platform {
         }
 
         pub fn write_clip(&self, _clip: &Clip) -> Result<(), String> {
-            Err("clipboard bridge is only implemented on macOS".to_string())
+            Err("clipboard bridge is only implemented on macOS and Windows".to_string())
         }
 
         pub fn has_accessibility_permission(&self) -> bool {
@@ -56,9 +59,13 @@ mod platform {
         }
 
         pub fn send_paste_keystroke(&self) -> Result<(), String> {
-            Err("paste keystroke is only implemented on macOS".to_string())
+            Err("paste keystroke is only implemented on macOS and Windows".to_string())
         }
     }
 }
 
+#[cfg(target_os = "windows")]
+pub use platform_win::ClipboardBridge;
+
+#[cfg(not(target_os = "windows"))]
 pub use platform::ClipboardBridge;

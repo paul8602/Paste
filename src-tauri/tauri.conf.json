@@ -36,14 +36,18 @@
     "targets": "all",
     "icon": [
       "icons/icon.png",
-      "icons/icon.icns"
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
     "category": "Productivity",
-    "shortDescription": "Keyboard-first clipboard history for macOS.",
-    "longDescription": "Paste is a macOS clipboard history tool with fuzzy search and keyboard-driven paste.",
+    "shortDescription": "Keyboard-first clipboard history for macOS and Windows.",
+    "longDescription": "Paste is a clipboard history tool with fuzzy search and keyboard-driven paste for macOS and Windows.",
     "macOS": {
       "minimumSystemVersion": "12.0",
       "entitlements": "Entitlements.plist"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "embedBootstrapper" }
     }
   }
 }

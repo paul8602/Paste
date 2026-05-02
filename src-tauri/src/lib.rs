@@ -77,10 +77,17 @@ fn has_accessibility_permission(state: tauri::State<'_, AppState>) -> bool {
 
 #[tauri::command]
 fn open_accessibility_settings() -> Result<(), String> {
-    Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .status()
-        .map_err(|error| format!("failed to open Accessibility settings: {error}"))?;
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .status()
+            .map_err(|error| format!("failed to open Accessibility settings: {error}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Windows does not require accessibility permission for paste keystrokes
+    }
     Ok(())
 }
 
@@ -197,7 +204,10 @@ pub fn run() {
 
             app.manage(state);
 
+            #[cfg(target_os = "macos")]
             let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyV);
+            #[cfg(not(target_os = "macos"))]
+            let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyV);
             let handle = app.handle().clone();
             app.global_shortcut()
                 .on_shortcut(shortcut, move |_app, _shortcut, event| {
