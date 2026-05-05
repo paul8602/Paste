@@ -134,4 +134,4 @@ DMG 文件输出至 `src-tauri/target/release/bundle/dmg/`。
 
 ## 许可证
 
-MIT
+[MIT](./LICENSE)
