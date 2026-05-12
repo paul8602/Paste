@@ -1,5 +1,5 @@
-use super::{Clip, ClipboardItem, ClipboardPayload};
-use crate::history::ClipKind;
+use super::{ClipboardItem, ClipboardPayload};
+use crate::history::{Clip, ClipKind};
 use windows::Win32::Foundation::{HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
