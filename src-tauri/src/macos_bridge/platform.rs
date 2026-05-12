@@ -90,7 +90,7 @@ impl ClipboardBridge {
 
                 return Ok(Some(ClipboardItem {
                     kind,
-                    text_preview: summarize_text(&text),
+                    text_preview: super::summarize_text(&text),
                     payloads,
                 }));
             }
@@ -197,41 +197,3 @@ unsafe fn set_string_for_type(pasteboard: id, value: &str, uti: &str) {
     let _: bool = msg_send![pasteboard, setString: ns_value forType: ns_type];
 }
 
-fn summarize_text(value: &str) -> String {
-    let summary = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if summary.chars().count() > 160 {
-        format!("{}...", summary.chars().take(157).collect::<String>())
-    } else {
-        summary
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn short_text_unchanged() {
-        assert_eq!(summarize_text("hello world"), "hello world");
-    }
-
-    #[test]
-    fn collapses_whitespace() {
-        assert_eq!(summarize_text("hello   world\n\tfoo"), "hello world foo");
-    }
-
-    #[test]
-    fn truncates_long_text_at_160_chars() {
-        let long = "a".repeat(200);
-        let result = summarize_text(&long);
-        assert!(result.ends_with("..."));
-        assert_eq!(result.chars().count(), 160);
-    }
-
-    #[test]
-    fn exactly_160_chars_not_truncated() {
-        let exact = "a".repeat(160);
-        let result = summarize_text(&exact);
-        assert!(!result.ends_with("..."));
-    }
-}

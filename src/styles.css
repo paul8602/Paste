@@ -91,6 +91,23 @@ input {
   color: #777784;
 }
 
+.search-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgb(255 255 255 / 14%);
+  border-top-color: #a8a8b3;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+.search-spinner[hidden] {
+  display: none;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 button {
   border: 1px solid rgb(255 255 255 / 12%);
   border-radius: 8px;
@@ -151,6 +168,13 @@ button:hover {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
+}
+
+.clip-thumb {
+  width: 48px;
+  height: 34px;
+  border-radius: 9px;
+  object-fit: cover;
 }
 
 .clip-body {

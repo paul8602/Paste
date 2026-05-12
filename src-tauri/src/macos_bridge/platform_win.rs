@@ -47,7 +47,7 @@ impl ClipboardBridge {
                             paths.push(path);
                         }
                         let text = paths.join("\n");
-                        let preview = summarize_text(&text);
+                        let preview = super::summarize_text(&text);
                         return Ok(Some(ClipboardItem {
                             kind: ClipKind::FileUrl,
                             text_preview: preview,
@@ -95,7 +95,7 @@ impl ClipboardBridge {
                         let wchars = unsafe { std::slice::from_raw_parts(p, end) };
                         let text = String::from_utf16_lossy(wchars);
                         unsafe { let _ = GlobalUnlock(hglobal); }
-                        let preview = summarize_text(&text);
+                        let preview = super::summarize_text(&text);
                         return Ok(Some(ClipboardItem {
                             kind: ClipKind::Text,
                             text_preview: preview,
@@ -225,40 +225,3 @@ impl ClipboardBridge {
     }
 }
 
-fn summarize_text(value: &str) -> String {
-    let collapsed: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.len() > 160 {
-        format!("{}...", &collapsed[..160])
-    } else {
-        collapsed
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn summarize_short_text() {
-        assert_eq!(summarize_text("hello"), "hello");
-    }
-
-    #[test]
-    fn summarize_collapses_whitespace() {
-        assert_eq!(summarize_text("hello   world"), "hello world");
-    }
-
-    #[test]
-    fn summarize_truncates_long_text() {
-        let long = "a".repeat(200);
-        let result = summarize_text(&long);
-        assert_eq!(result.len(), 163);
-        assert!(result.ends_with("..."));
-    }
-
-    #[test]
-    fn summarize_exact_160() {
-        let text = "a".repeat(160);
-        assert_eq!(summarize_text(&text), text);
-    }
-}

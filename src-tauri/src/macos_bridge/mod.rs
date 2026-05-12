@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::history::{Clip, ClipKind};
+use crate::history::ClipKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipboardPayload {
@@ -33,7 +33,8 @@ mod platform_win;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod platform {
-    use super::{Clip, ClipboardItem};
+    use crate::history::Clip;
+    use super::ClipboardItem;
 
     pub struct ClipboardBridge;
 
@@ -69,3 +70,42 @@ pub use platform_win::ClipboardBridge;
 
 #[cfg(not(target_os = "windows"))]
 pub use platform::ClipboardBridge;
+
+pub(super) fn summarize_text(value: &str) -> String {
+    let summary = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if summary.chars().count() > 160 {
+        format!("{}...", summary.chars().take(157).collect::<String>())
+    } else {
+        summary
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_text_unchanged() {
+        assert_eq!(summarize_text("hello world"), "hello world");
+    }
+
+    #[test]
+    fn collapses_whitespace() {
+        assert_eq!(summarize_text("hello   world\n\tfoo"), "hello world foo");
+    }
+
+    #[test]
+    fn truncates_long_text_at_160_chars() {
+        let long = "a".repeat(200);
+        let result = summarize_text(&long);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 160);
+    }
+
+    #[test]
+    fn exactly_160_chars_not_truncated() {
+        let exact = "a".repeat(160);
+        let result = summarize_text(&exact);
+        assert!(!result.ends_with("..."));
+    }
+}

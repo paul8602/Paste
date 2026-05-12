@@ -49,6 +49,10 @@ export function hasAccessibilityPermission(): Promise<boolean> {
   return invoke("has_accessibility_permission");
 }
 
+export function getClipThumbnail(id: string): Promise<string | null> {
+  return invoke("get_clip_thumbnail", { id });
+}
+
 export function openAccessibilitySettings(): Promise<void> {
   return invoke("open_accessibility_settings");
 }

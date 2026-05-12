@@ -3,16 +3,15 @@ import { listen } from "@tauri-apps/api/event";
 import {
   type AppSettings,
   type ClipSummary,
-  deleteClip,
   getSettings,
   hasAccessibilityPermission,
   hidePanel,
   openAccessibilitySettings,
   pasteClip,
-  pinClip,
-  saveSettings,
   searchClips
 } from "./lib/commands";
+import { renderClips, updateSelection } from "./components/clip-list";
+import { renderSettings, setupSettings } from "./components/settings";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 
@@ -38,6 +37,7 @@ app.innerHTML = `
     <header class="search-row">
       <div class="search-icon">⌘</div>
       <input id="search" type="search" placeholder="Search clipboard history" autofocus />
+      <span class="search-spinner" hidden></span>
       <button id="settings-toggle" title="Settings">Settings</button>
     </header>
     <ol id="clips" class="clip-list"></ol>
@@ -69,97 +69,20 @@ const maxItemsInput = document.querySelector<HTMLInputElement>("#max-items")!;
 const maxSizeInput = document.querySelector<HTMLInputElement>("#max-size")!;
 const trimDedupInput = document.querySelector<HTMLInputElement>("#trim-dedup")!;
 
-function clipIcon(kind: ClipSummary["kind"]): string {
-  switch (kind) {
-    case "image":
-      return "IMG";
-    case "file_url":
-      return "FILE";
-    case "html":
-      return "HTML";
-    case "rtf":
-      return "RTF";
-    case "text":
-      return "TXT";
-  }
-}
-
-function updateSelection(oldIndex: number, newIndex: number): void {
-  const items = list.querySelectorAll<HTMLElement>(".clip");
-  items[oldIndex]?.classList.remove("selected");
-  items[newIndex]?.classList.add("selected");
-}
-
-function renderClips(): void {
-  list.innerHTML = "";
-
-  if (clips.length === 0) {
-    const empty = document.createElement("li");
-    empty.className = "empty-state";
-    empty.textContent = query ? "No matching clipboard items" : "Copy something to begin";
-    list.append(empty);
-    return;
-  }
-
-  clips.forEach((clip, index) => {
-    const item = document.createElement("li");
-    item.className = `clip ${index === selectedIndex ? "selected" : ""}`;
-    item.dataset.id = clip.id;
-
-    const number = index < 9 ? `${index + 1}` : "";
-    item.innerHTML = `
-      <span class="clip-number">${number}</span>
-      <span class="clip-kind">${clipIcon(clip.kind)}</span>
-      <span class="clip-body">
-        <strong>${escapeHtml(clip.textPreview || "(empty item)")}</strong>
-        <small>${new Date(clip.createdAt).toLocaleString()}${clip.isPinned ? " · Pinned" : ""}</small>
-      </span>
-      <button class="pin" title="Pin">${clip.isPinned ? "Unpin" : "Pin"}</button>
-      <button class="delete" title="Delete">Delete</button>
-    `;
-
-    item.addEventListener("mousemove", () => {
-      if (selectedIndex !== index) {
-        selectedIndex = index;
-        renderClips();
-      }
-    });
-    item.addEventListener("dblclick", () => chooseClip(index));
-    item.querySelector<HTMLButtonElement>(".pin")?.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await pinClip(clip.id, !clip.isPinned);
-      await refresh();
-    });
-    item.querySelector<HTMLButtonElement>(".delete")?.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await deleteClip(clip.id);
-      await refresh();
-    });
-
-    list.append(item);
-  });
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
 async function refresh(): Promise<void> {
+  const spinner = document.querySelector<HTMLElement>(".search-spinner");
+  if (spinner) spinner.hidden = false;
+
   clips = await searchClips(query, 40);
   selectedIndex = Math.min(selectedIndex, Math.max(clips.length - 1, 0));
-  renderClips();
+  renderClips(clips, selectedIndex, list, query, chooseClip, refresh);
+
+  if (spinner) spinner.hidden = true;
 }
 
 async function chooseClip(index: number): Promise<void> {
   const clip = clips[index];
-  if (!clip) {
-    return;
-  }
+  if (!clip) return;
 
   try {
     await pasteClip(clip.id);
@@ -169,11 +92,11 @@ async function chooseClip(index: number): Promise<void> {
   }
 }
 
-function renderSettings(): void {
-  maxItemsInput.value = String(settings.maxItems);
-  maxSizeInput.value = String(Math.round(settings.maxPayloadBytes / 1024 / 1024));
-  trimDedupInput.checked = settings.trimWhitespaceForTextDedup;
-}
+setupSettings(settingsForm, settingsToggle, {
+  maxItemsInput, maxSizeInput, trimDedupInput
+}, () => settings, (updated) => {
+  settings = updated;
+});
 
 let searchDebounce: ReturnType<typeof setTimeout>;
 searchInput.addEventListener("input", () => {
@@ -183,21 +106,6 @@ searchInput.addEventListener("input", () => {
     selectedIndex = 0;
     await refresh();
   }, 150);
-});
-
-settingsToggle.addEventListener("click", () => {
-  settingsForm.classList.toggle("hidden");
-  renderSettings();
-});
-
-settingsForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  settings = await saveSettings({
-    maxItems: Number(maxItemsInput.value),
-    maxPayloadBytes: Number(maxSizeInput.value) * 1024 * 1024,
-    trimWhitespaceForTextDedup: trimDedupInput.checked
-  });
-  settingsForm.classList.add("hidden");
 });
 
 permissionOpen.addEventListener("click", () => {
@@ -214,7 +122,7 @@ document.addEventListener("keydown", async (event) => {
     event.preventDefault();
     const newIndex = Math.min(selectedIndex + 1, clips.length - 1);
     if (newIndex !== selectedIndex) {
-      updateSelection(selectedIndex, newIndex);
+      updateSelection(list, selectedIndex, newIndex);
       selectedIndex = newIndex;
     }
     return;
@@ -224,7 +132,7 @@ document.addEventListener("keydown", async (event) => {
     event.preventDefault();
     const newIndex = Math.max(selectedIndex - 1, 0);
     if (newIndex !== selectedIndex) {
-      updateSelection(selectedIndex, newIndex);
+      updateSelection(list, selectedIndex, newIndex);
       selectedIndex = newIndex;
     }
     return;
@@ -251,7 +159,7 @@ window.addEventListener("focus", () => {
 });
 
 settings = await getSettings();
-renderSettings();
+renderSettings(settings, { maxItemsInput, maxSizeInput, trimDedupInput });
 if (!(await hasAccessibilityPermission())) {
   permissionBanner.classList.remove("hidden");
 }

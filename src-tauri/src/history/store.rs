@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use base64::Engine;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -83,7 +85,11 @@ impl Default for AppSettings {
 pub struct HistoryStore {
     conn: Connection,
     blobs_dir: PathBuf,
+    cached_settings: Mutex<Option<AppSettings>>,
+    insert_count: Cell<usize>,
 }
+
+const PRUNE_INTERVAL: usize = 10;
 
 impl HistoryStore {
     pub fn new(app_data_dir: PathBuf) -> rusqlite::Result<Self> {
@@ -128,7 +134,12 @@ impl HistoryStore {
             ",
         )?;
 
-        Ok(Self { conn, blobs_dir })
+        Ok(Self {
+            conn,
+            blobs_dir,
+            cached_settings: Mutex::new(None),
+            insert_count: Cell::new(0),
+        })
     }
 
     pub fn insert_clip(&self, item: ClipboardItem) -> rusqlite::Result<()> {
@@ -188,17 +199,47 @@ impl HistoryStore {
             )?;
         }
 
-        self.prune(settings.max_items)?;
+        let count = self.insert_count.get() + 1;
+        self.insert_count.set(count);
+        if count >= PRUNE_INTERVAL {
+            self.insert_count.set(0);
+            self.prune(settings.max_items)?;
+        }
         Ok(())
     }
 
     pub fn search(&self, query: &str, limit: usize) -> rusqlite::Result<Vec<ClipSummary>> {
+        let query = query.trim();
+
+        if query.is_empty() {
+            let mut stmt = self.conn.prepare(
+                "
+                SELECT id, created_at, kind, text_preview, payload_ref, is_pinned
+                FROM clips
+                ORDER BY is_pinned DESC, created_at DESC
+                LIMIT ?1
+                ",
+            )?;
+
+            return stmt
+                .query_map(params![limit as i64], |row| {
+                    Ok(ClipSummary {
+                        id: row.get(0)?,
+                        created_at: row.get(1)?,
+                        kind: ClipKind::from_str(row.get::<_, String>(2)?.as_str()),
+                        text_preview: row.get(3)?,
+                        payload_ref: row.get(4)?,
+                        is_pinned: row.get::<_, i64>(5)? == 1,
+                    })
+                })?
+                .collect();
+        }
+
         let mut stmt = self.conn.prepare(
             "
             SELECT id, created_at, kind, text_preview, payload_ref, is_pinned
             FROM clips
             ORDER BY is_pinned DESC, created_at DESC
-            LIMIT 1000
             ",
         )?;
 
@@ -215,16 +256,14 @@ impl HistoryStore {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        if !query.trim().is_empty() {
-            clips = clips
-                .into_iter()
-                .filter_map(|clip| score_clip(query, &clip.text_preview).map(|score| (clip, score)))
-                .collect::<Vec<_>>()
-                .sorted_by_score()
-                .into_iter()
-                .map(|(clip, _score)| clip)
-                .collect();
-        }
+        clips = clips
+            .into_iter()
+            .filter_map(|clip| score_clip(query, &clip.text_preview).map(|score| (clip, score)))
+            .collect::<Vec<_>>()
+            .sorted_by_score()
+            .into_iter()
+            .map(|(clip, _score)| clip)
+            .collect();
 
         clips.truncate(limit);
         Ok(clips)
@@ -285,6 +324,40 @@ impl HistoryStore {
         Ok(())
     }
 
+    pub fn get_clip_thumbnail(&self, id: &str) -> rusqlite::Result<Option<String>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT p.storage, p.value, p.uti
+                 FROM payloads p
+                 WHERE p.clip_id = ?1
+                 ORDER BY p.position ASC
+                 LIMIT 1",
+                params![id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            )
+            .optional()?;
+
+        let Some((storage, value, uti)) = row else {
+            return Ok(None);
+        };
+
+        let data = if storage == "blob" {
+            fs::read(self.blobs_dir.join(&value)).map_err(to_sql_error)?
+        } else {
+            base64::engine::general_purpose::STANDARD
+                .decode(&value)
+                .map_err(|error| to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))?
+        };
+
+        let mime = uti_to_mime(&uti);
+        Ok(Some(format!(
+            "data:{};base64,{}",
+            mime,
+            base64::engine::general_purpose::STANDARD.encode(&data)
+        )))
+    }
+
     pub fn pin_clip(&self, id: &str, pinned: bool) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE clips SET is_pinned = ?2 WHERE id = ?1",
@@ -294,14 +367,26 @@ impl HistoryStore {
     }
 
     pub fn get_settings(&self) -> rusqlite::Result<AppSettings> {
+        if let Ok(guard) = self.cached_settings.lock() {
+            if let Some(ref settings) = *guard {
+                return Ok(settings.clone());
+            }
+        }
+
         let value = self
             .conn
             .query_row("SELECT value FROM settings WHERE key = 'app'", [], |row| row.get::<_, String>(0))
             .optional()?;
 
-        Ok(value
+        let settings: AppSettings = value
             .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default())
+            .unwrap_or_default();
+
+        if let Ok(mut guard) = self.cached_settings.lock() {
+            *guard = Some(settings.clone());
+        }
+
+        Ok(settings)
     }
 
     pub fn save_settings(&self, settings: AppSettings) -> rusqlite::Result<AppSettings> {
@@ -321,6 +406,12 @@ impl HistoryStore {
             params![value],
         )?;
         self.prune(normalized.max_items)?;
+        self.insert_count.set(0);
+
+        if let Ok(mut guard) = self.cached_settings.lock() {
+            *guard = Some(normalized.clone());
+        }
+
         Ok(normalized)
     }
 
@@ -361,22 +452,33 @@ impl HistoryStore {
     }
 
     fn prune(&self, max_items: usize) -> rusqlite::Result<()> {
-        let mut stmt = self.conn.prepare(&format!(
-            "
-            SELECT id
-            FROM clips
-            WHERE is_pinned = 0
-            ORDER BY created_at DESC, rowid DESC
-            LIMIT -1 OFFSET {max_items}
-            ",
-        ))?;
-        let stale_ids = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
+        let mut stmt = self.conn.prepare(
+            "SELECT p.value FROM payloads p
+             WHERE p.storage = 'blob'
+             AND p.clip_id IN (
+                 SELECT id FROM clips WHERE is_pinned = 0
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT -1 OFFSET ?1
+             )",
+        )?;
+        let filenames: Vec<String> = stmt
+            .query_map(params![max_items as i64], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        for id in stale_ids {
-            self.delete_clip(&id)?;
+        for filename in &filenames {
+            if is_safe_filename(filename) {
+                let _ = fs::remove_file(self.blobs_dir.join(filename));
+            }
         }
+
+        self.conn.execute(
+            "DELETE FROM clips WHERE is_pinned = 0 AND id IN (
+                SELECT id FROM clips WHERE is_pinned = 0
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT -1 OFFSET ?1
+            )",
+            params![max_items as i64],
+        )?;
 
         Ok(())
     }
@@ -390,7 +492,9 @@ impl HistoryStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         for filename in filenames {
-            let _ = fs::remove_file(self.blobs_dir.join(filename));
+            if is_safe_filename(&filename) {
+                let _ = fs::remove_file(self.blobs_dir.join(&filename));
+            }
         }
         Ok(())
     }
@@ -411,6 +515,30 @@ impl SortByScore for Vec<(ClipSummary, i64)> {
         });
         self
     }
+}
+
+fn uti_to_mime(uti: &str) -> &'static str {
+    if uti.contains("png") {
+        "image/png"
+    } else if uti.contains("jpeg") || uti.contains("jpg") {
+        "image/jpeg"
+    } else if uti.contains("gif") {
+        "image/gif"
+    } else if uti.contains("tiff") {
+        "image/tiff"
+    } else if uti.contains("bmp") {
+        "image/bmp"
+    } else if uti.contains("webp") {
+        "image/webp"
+    } else if uti.contains("heic") || uti.contains("heif") {
+        "image/heic"
+    } else {
+        "image/png"
+    }
+}
+
+fn is_safe_filename(name: &str) -> bool {
+    !name.contains("..") && !name.contains('/') && !name.contains('\\')
 }
 
 fn sanitize_uti(value: &str) -> String {
