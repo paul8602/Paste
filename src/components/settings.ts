@@ -4,12 +4,14 @@ export interface SettingsElements {
   maxItemsInput: HTMLInputElement;
   maxSizeInput: HTMLInputElement;
   trimDedupInput: HTMLInputElement;
+  samplingHashInput: HTMLInputElement;
 }
 
 export function renderSettings(settings: AppSettings, elements: SettingsElements): void {
   elements.maxItemsInput.value = String(settings.maxItems);
   elements.maxSizeInput.value = String(Math.round(settings.maxPayloadBytes / 1024 / 1024));
   elements.trimDedupInput.checked = settings.trimWhitespaceForTextDedup;
+  elements.samplingHashInput.checked = settings.useSamplingHash;
 }
 
 export function setupSettings(
@@ -29,7 +31,8 @@ export function setupSettings(
     const settings = await saveSettings({
       maxItems: Number(elements.maxItemsInput.value),
       maxPayloadBytes: Number(elements.maxSizeInput.value) * 1024 * 1024,
-      trimWhitespaceForTextDedup: elements.trimDedupInput.checked
+      trimWhitespaceForTextDedup: elements.trimDedupInput.checked,
+      useSamplingHash: elements.samplingHashInput.checked
     });
     form.classList.add("hidden");
     onSaved(settings);

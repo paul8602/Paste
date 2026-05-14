@@ -60,21 +60,67 @@ async function loadThumbnails(list: HTMLOListElement): Promise<void> {
   }
 }
 
+/**
+ * Highlight matching substrings of `query` within `text`, returning safe HTML.
+ * Each matched character is wrapped in a <mark> tag.
+ */
+function highlightMatch(text: string, query: string): string {
+  if (!query.trim()) return escapeHtml(text);
+
+  const escaped = escapeHtml(text);
+  const q = query.trim();
+  // Build case-insensitive matching pattern
+  const pattern = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`(${pattern})`, "gi");
+  return escaped.replace(regex, "<mark>$1</mark>");
+}
+
+function renderEmptyState(query: string): HTMLElement {
+  const empty = document.createElement("li");
+  empty.className = "empty-state";
+
+  if (query) {
+    empty.textContent = "No matching clipboard items";
+    return empty;
+  }
+
+  empty.innerHTML = `
+    <div class="empty-guide">
+      <h2>Welcome to Paste</h2>
+      <p>Your clipboard history appears here automatically.</p>
+      <div class="empty-steps">
+        <div class="empty-step">
+          <span class="empty-step-icon">1</span>
+          <span>Copy text or images in any app with <kbd>Cmd+C</kbd></span>
+        </div>
+        <div class="empty-step">
+          <span class="empty-step-icon">2</span>
+          <span>Press <kbd>Cmd+Shift+V</kbd> to open Paste</span>
+        </div>
+        <div class="empty-step">
+          <span class="empty-step-icon">3</span>
+          <span>Type to search, then press <kbd>Enter</kbd> to paste</span>
+        </div>
+      </div>
+    </div>
+  `;
+  return empty;
+}
+
 export function renderClips(
   clips: ClipSummary[],
   selectedIndex: number,
   list: HTMLOListElement,
   query: string,
   onChoose: (index: number) => void,
-  onRefresh: () => Promise<void>
+  onRefresh: () => Promise<void>,
+  hasMore = false,
+  onLoadMore?: () => Promise<void>
 ): void {
   list.innerHTML = "";
 
   if (clips.length === 0) {
-    const empty = document.createElement("li");
-    empty.className = "empty-state";
-    empty.textContent = query ? "No matching clipboard items" : "Copy something to begin";
-    list.append(empty);
+    list.append(renderEmptyState(query));
     return;
   }
 
@@ -83,15 +129,19 @@ export function renderClips(
     item.className = `clip ${index === selectedIndex ? "selected" : ""}`;
     item.dataset.id = clip.id;
 
+    const timestamp = new Date(clip.createdAt).toLocaleString();
+    const fullPreview = clip.textPreview || "(empty item)";
+    const displayPreview = highlightMatch(fullPreview, query);
+
     const number = index < 9 ? `${index + 1}` : "";
     item.innerHTML = `
       <span class="clip-number">${number}</span>
       ${clipKindHtml(clip.kind, clip.id)}
-      <span class="clip-body">
-        <strong>${escapeHtml(clip.textPreview || "(empty item)")}</strong>
-        <small>${new Date(clip.createdAt).toLocaleString()}${clip.isPinned ? " · Pinned" : ""}</small>
+      <span class="clip-body" title="${escapeHtml(fullPreview)} · ${timestamp}${clip.isPinned ? " · Pinned" : ""}">
+        <strong>${displayPreview}</strong>
+        <small>${timestamp}${clip.isPinned ? " · Pinned" : ""}</small>
       </span>
-      <button class="pin" title="Pin">${clip.isPinned ? "Unpin" : "Pin"}</button>
+      <button class="pin" title="${clip.isPinned ? "Unpin" : "Pin"}">${clip.isPinned ? "Unpin" : "Pin"}</button>
       <button class="delete" title="Delete">Delete</button>
     `;
 
@@ -116,6 +166,20 @@ export function renderClips(
 
     list.append(item);
   });
+
+  // "Load more" button
+  if (hasMore && onLoadMore) {
+    const loadMoreItem = document.createElement("li");
+    loadMoreItem.className = "load-more-item";
+    const btn = document.createElement("button");
+    btn.className = "load-more-btn";
+    btn.textContent = "Load more...";
+    btn.addEventListener("click", () => {
+      void onLoadMore();
+    });
+    loadMoreItem.append(btn);
+    list.append(loadMoreItem);
+  }
 
   void loadThumbnails(list);
 }

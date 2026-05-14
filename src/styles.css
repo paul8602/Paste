@@ -256,3 +256,103 @@ button:hover {
   color: #a6a6b0;
   text-align: center;
 }
+
+.empty-guide h2 {
+  margin: 0 0 8px;
+  color: #e8e8ed;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.empty-guide > p {
+  margin: 0 0 24px;
+  font-size: 14px;
+}
+
+.empty-steps {
+  display: grid;
+  gap: 12px;
+  text-align: left;
+}
+
+.empty-step {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgb(255 255 255 / 6%);
+}
+
+.empty-step-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  place-items: center;
+  border-radius: 6px;
+  color: #101014;
+  background: #729cff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid rgb(255 255 255 / 20%);
+  border-radius: 4px;
+  background: rgb(255 255 255 / 8%);
+  font-size: 0.88em;
+  font-family: inherit;
+}
+
+/* Search result highlight */
+.clip-body strong mark {
+  color: #ffd86b;
+  background: rgb(255 216 107 / 14%);
+  border-radius: 2px;
+}
+
+/* Keyboard shortcut hints footer */
+.shortcut-hints {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  padding: 8px 16px 10px;
+  border-top: 1px solid rgb(255 255 255 / 6%);
+  color: #787884;
+  font-size: 12px;
+}
+
+.shortcut-hints kbd {
+  margin-right: 3px;
+  color: #a0a0ad;
+}
+
+/* Tooltip on clip-body hover */
+.clip-body[title] {
+  cursor: default;
+}
+
+/* Load more button */
+.load-more-item {
+  display: flex;
+  justify-content: center;
+  padding: 10px;
+}
+
+.load-more-btn {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 8px;
+  color: #a0a0ad;
+  background: rgb(255 255 255 / 4%);
+  cursor: pointer;
+}
+
+.load-more-btn:hover {
+  color: #e8e8ed;
+  background: rgb(255 255 255 / 10%);
+}

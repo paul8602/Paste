@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
 
@@ -9,14 +9,40 @@ use crate::history::{AppSettings, ClipSummary};
 use crate::AppState;
 use crate::PASTE_IN_PROGRESS;
 
+/// Maximum time to wait for clipboard write to be acknowledged (ms).
+const MAX_PASTE_WAIT_MS: u64 = 200;
+/// Polling interval when waiting for clipboard changeCount to update (ms).
+const PASTE_POLL_STEP_MS: u64 = 15;
+
 #[tauri::command]
 pub fn search_clips(
     state: tauri::State<'_, AppState>,
     query: String,
     limit: usize,
+    offset: usize,
 ) -> Result<Vec<ClipSummary>, PasteError> {
     let store = state.store.lock().map_err(|_| PasteError::LockPoisoned)?;
-    store.search(&query, limit).map_err(PasteError::Store)
+    store.search(&query, limit, offset).map_err(PasteError::Store)
+}
+
+/// Wait for the clipboard changeCount to shift, confirming the write completed.
+/// Falls back to a minimum sleep if changeCount is unavailable.
+fn wait_for_clipboard_write(bridge: &crate::macos_bridge::ClipboardBridge, count_before: i64) {
+    let deadline = Instant::now() + Duration::from_millis(MAX_PASTE_WAIT_MS);
+    loop {
+        let elapsed = Instant::now();
+        if elapsed >= deadline {
+            break;
+        }
+        if let Ok(count) = bridge.change_count() {
+            if count != count_before {
+                return; // write acknowledged
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let step = Duration::from_millis(PASTE_POLL_STEP_MS).min(remaining);
+        thread::sleep(step);
+    }
 }
 
 #[tauri::command]
@@ -31,12 +57,16 @@ pub fn paste_clip(
     };
 
     PASTE_IN_PROGRESS.store(true, Ordering::SeqCst);
+
+    let count_before = state.bridge.change_count().unwrap_or_default();
     state
         .bridge
         .write_clip(&clip)
         .map_err(PasteError::Clipboard)?;
     hide_panel(app.clone())?;
-    thread::sleep(Duration::from_millis(80));
+
+    wait_for_clipboard_write(&state.bridge, count_before);
+
     let result = state
         .bridge
         .send_paste_keystroke()

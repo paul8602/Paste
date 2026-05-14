@@ -19,13 +19,18 @@ if (!app) {
   throw new Error("Missing #app root element");
 }
 
+const PAGE_SIZE = 40;
+
 let query = "";
 let clips: ClipSummary[] = [];
 let selectedIndex = 0;
+let hasMore = false;
+let loadingMore = false;
 let settings: AppSettings = {
   maxItems: 1000,
   maxPayloadBytes: 25 * 1024 * 1024,
-  trimWhitespaceForTextDedup: true
+  trimWhitespaceForTextDedup: true,
+  useSamplingHash: false
 };
 
 app.innerHTML = `
@@ -41,6 +46,12 @@ app.innerHTML = `
       <button id="settings-toggle" title="Settings">Settings</button>
     </header>
     <ol id="clips" class="clip-list"></ol>
+    <footer class="shortcut-hints">
+      <span><kbd>↑↓</kbd> Navigate</span>
+      <span><kbd>1-9</kbd> Quick paste</span>
+      <span><kbd>Enter</kbd> Paste</span>
+      <span><kbd>Esc</kbd> Close</span>
+    </footer>
     <form id="settings" class="settings hidden">
       <label>
         Max items
@@ -53,6 +64,10 @@ app.innerHTML = `
       <label class="checkbox">
         <input id="trim-dedup" type="checkbox" />
         Trim whitespace for text deduplication
+      </label>
+      <label class="checkbox">
+        <input id="sampling-hash" type="checkbox" />
+        Sampling hash for large items (&gt;1MB, faster but may miss duplicates)
       </label>
       <button type="submit">Save</button>
     </form>
@@ -68,16 +83,31 @@ const settingsToggle = document.querySelector<HTMLButtonElement>("#settings-togg
 const maxItemsInput = document.querySelector<HTMLInputElement>("#max-items")!;
 const maxSizeInput = document.querySelector<HTMLInputElement>("#max-size")!;
 const trimDedupInput = document.querySelector<HTMLInputElement>("#trim-dedup")!;
+const samplingHashInput = document.querySelector<HTMLInputElement>("#sampling-hash")!;
 
 async function refresh(): Promise<void> {
   const spinner = document.querySelector<HTMLElement>(".search-spinner");
   if (spinner) spinner.hidden = false;
 
-  clips = await searchClips(query, 40);
+  clips = await searchClips(query, PAGE_SIZE, 0);
+  hasMore = clips.length === PAGE_SIZE;
   selectedIndex = Math.min(selectedIndex, Math.max(clips.length - 1, 0));
-  renderClips(clips, selectedIndex, list, query, chooseClip, refresh);
+  renderClips(clips, selectedIndex, list, query, chooseClip, refresh, hasMore, loadMore);
 
   if (spinner) spinner.hidden = true;
+}
+
+async function loadMore(): Promise<void> {
+  if (loadingMore || !hasMore) return;
+  loadingMore = true;
+
+  const more = await searchClips(query, PAGE_SIZE, clips.length);
+  if (more.length < PAGE_SIZE) {
+    hasMore = false;
+  }
+  clips = clips.concat(more);
+  renderClips(clips, selectedIndex, list, query, chooseClip, refresh, hasMore, loadMore);
+  loadingMore = false;
 }
 
 async function chooseClip(index: number): Promise<void> {
@@ -93,7 +123,7 @@ async function chooseClip(index: number): Promise<void> {
 }
 
 setupSettings(settingsForm, settingsToggle, {
-  maxItemsInput, maxSizeInput, trimDedupInput
+  maxItemsInput, maxSizeInput, trimDedupInput, samplingHashInput
 }, () => settings, (updated) => {
   settings = updated;
 });
@@ -159,7 +189,7 @@ window.addEventListener("focus", () => {
 });
 
 settings = await getSettings();
-renderSettings(settings, { maxItemsInput, maxSizeInput, trimDedupInput });
+renderSettings(settings, { maxItemsInput, maxSizeInput, trimDedupInput, samplingHashInput });
 if (!(await hasAccessibilityPermission())) {
   permissionBanner.classList.remove("hidden");
 }

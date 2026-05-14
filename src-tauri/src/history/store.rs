@@ -70,6 +70,7 @@ pub struct AppSettings {
     pub max_items: usize,
     pub max_payload_bytes: usize,
     pub trim_whitespace_for_text_dedup: bool,
+    pub use_sampling_hash: bool,
 }
 
 impl Default for AppSettings {
@@ -78,6 +79,7 @@ impl Default for AppSettings {
             max_items: 1000,
             max_payload_bytes: 25 * 1024 * 1024,
             trim_whitespace_for_text_dedup: true,
+            use_sampling_hash: false,
         }
     }
 }
@@ -90,6 +92,9 @@ pub struct HistoryStore {
 }
 
 const PRUNE_INTERVAL: usize = 10;
+const SAMPLING_HASH_THRESHOLD: usize = 1024 * 1024;
+const SAMPLING_HASH_HEAD_BYTES: usize = 64 * 1024;
+const SAMPLING_HASH_TAIL_BYTES: usize = 64 * 1024;
 
 impl HistoryStore {
     pub fn new(app_data_dir: PathBuf) -> rusqlite::Result<Self> {
@@ -165,50 +170,98 @@ impl HistoryStore {
             .find(|payload| payload.is_blob_candidate())
             .map(|payload| payload.uti.clone());
 
-        self.conn.execute(
-            "
-            INSERT INTO clips (id, created_at, kind, text_preview, payload_ref, pasteboard_hash)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            ON CONFLICT(pasteboard_hash) DO UPDATE SET created_at = excluded.created_at
-            ",
-            params![
-                id,
-                created_at,
-                item.kind.as_str(),
-                item.text_preview,
-                payload_ref,
-                hash
-            ],
-        )?;
+        // Wrap all DB writes in an explicit transaction.
+        // Blob files are written after COMMIT so they use the correct clip_id.
+        let tx_result = (|| -> rusqlite::Result<String> {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
-        let clip_id = self
-            .conn
-            .query_row("SELECT id FROM clips WHERE pasteboard_hash = ?1", params![hash], |row| row.get::<_, String>(0))?;
-
-        self.conn
-            .execute("DELETE FROM payloads WHERE clip_id = ?1", params![clip_id])?;
-
-        for (position, payload) in item.payloads.into_iter().enumerate() {
-            let (storage, value) = self.persist_payload(&clip_id, &payload, &settings)?;
             self.conn.execute(
                 "
-                INSERT INTO payloads (clip_id, uti, storage, value, position)
-                VALUES (?1, ?2, ?3, ?4, ?5)
+                INSERT INTO clips (id, created_at, kind, text_preview, payload_ref, pasteboard_hash)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(pasteboard_hash) DO UPDATE SET created_at = excluded.created_at
                 ",
-                params![clip_id, payload.uti, storage, value, position as i64],
+                params![
+                    id,
+                    created_at,
+                    item.kind.as_str(),
+                    item.text_preview,
+                    payload_ref,
+                    hash
+                ],
             )?;
+
+            let clip_id: String = self
+                .conn
+                .query_row("SELECT id FROM clips WHERE pasteboard_hash = ?1", params![hash], |row| row.get(0))?;
+
+            self.conn
+                .execute("DELETE FROM payloads WHERE clip_id = ?1", params![&clip_id])?;
+
+            for (position, payload) in item.payloads.iter().enumerate() {
+                let (storage, value) = self.payload_storage_info(&clip_id, payload);
+                self.conn.execute(
+                    "
+                    INSERT INTO payloads (clip_id, uti, storage, value, position)
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    ",
+                    params![&clip_id, payload.uti, storage, value, position as i64],
+                )?;
+            }
+
+            self.conn.execute_batch("COMMIT")?;
+            Ok(clip_id)
+        })();
+
+        let clip_id = match tx_result {
+            Ok(clip_id) => clip_id,
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        };
+
+        // Write blob files after commit — file I/O is best-effort after DB is consistent
+        for payload in &item.payloads {
+            self.write_blob_file(&clip_id, payload);
         }
 
+        // Prune runs after commit as a separate operation
         let count = self.insert_count.get() + 1;
         self.insert_count.set(count);
         if count >= PRUNE_INTERVAL {
             self.insert_count.set(0);
             self.prune(settings.max_items)?;
         }
+
         Ok(())
     }
 
-    pub fn search(&self, query: &str, limit: usize) -> rusqlite::Result<Vec<ClipSummary>> {
+    /// Returns (storage, value) metadata without writing blob files to disk.
+    fn payload_storage_info(&self, clip_id: &str, payload: &ClipboardPayload) -> (String, String) {
+        if payload.is_blob_candidate() || payload.data.len() > 256 * 1024 {
+            let file_name = format!("{}-{}.bin", clip_id, sanitize_uti(&payload.uti));
+            ("blob".to_string(), file_name)
+        } else {
+            (
+                "inline".to_string(),
+                base64::engine::general_purpose::STANDARD.encode(&payload.data),
+            )
+        }
+    }
+
+    /// Write a single payload's blob file. Errors are logged, not propagated.
+    fn write_blob_file(&self, clip_id: &str, payload: &ClipboardPayload) {
+        if !payload.is_blob_candidate() && payload.data.len() <= 256 * 1024 {
+            return;
+        }
+        let file_name = format!("{}-{}.bin", clip_id, sanitize_uti(&payload.uti));
+        if let Err(e) = fs::write(self.blobs_dir.join(&file_name), &payload.data) {
+            tracing::error!("failed to write blob file {file_name}: {e}");
+        }
+    }
+
+    pub fn search(&self, query: &str, limit: usize, offset: usize) -> rusqlite::Result<Vec<ClipSummary>> {
         let query = query.trim();
 
         if query.is_empty() {
@@ -217,12 +270,12 @@ impl HistoryStore {
                 SELECT id, created_at, kind, text_preview, payload_ref, is_pinned
                 FROM clips
                 ORDER BY is_pinned DESC, created_at DESC
-                LIMIT ?1
+                LIMIT ?1 OFFSET ?2
                 ",
             )?;
 
             return stmt
-                .query_map(params![limit as i64], |row| {
+                .query_map(params![limit as i64, offset as i64], |row| {
                     Ok(ClipSummary {
                         id: row.get(0)?,
                         created_at: row.get(1)?,
@@ -265,8 +318,11 @@ impl HistoryStore {
             .map(|(clip, _score)| clip)
             .collect();
 
-        clips.truncate(limit);
-        Ok(clips)
+        // Apply offset + limit in memory for fuzzy search results
+        let total = clips.len();
+        let start = offset.min(total);
+        let end = (start + limit).min(total);
+        Ok(clips[start..end].to_vec())
     }
 
     pub fn get_clip(&self, id: &str) -> rusqlite::Result<Clip> {
@@ -394,6 +450,7 @@ impl HistoryStore {
             max_items: settings.max_items.clamp(50, 10_000),
             max_payload_bytes: settings.max_payload_bytes.clamp(1024 * 1024, 500 * 1024 * 1024),
             trim_whitespace_for_text_dedup: settings.trim_whitespace_for_text_dedup,
+            use_sampling_hash: settings.use_sampling_hash,
         };
         let value = serde_json::to_string(&normalized)
             .map_err(|error| to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))?;
@@ -412,25 +469,12 @@ impl HistoryStore {
             *guard = Some(normalized.clone());
         }
 
-        Ok(normalized)
-    }
-
-    fn persist_payload(
-        &self,
-        clip_id: &str,
-        payload: &ClipboardPayload,
-        _settings: &AppSettings,
-    ) -> rusqlite::Result<(String, String)> {
-        if payload.is_blob_candidate() || payload.data.len() > 256 * 1024 {
-            let file_name = format!("{}-{}.bin", clip_id, sanitize_uti(&payload.uti));
-            fs::write(self.blobs_dir.join(&file_name), &payload.data).map_err(to_sql_error)?;
-            return Ok(("blob".to_string(), file_name));
+        // Periodically truncate WAL to bound its size on disk
+        if let Err(e) = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)") {
+            tracing::warn!("WAL checkpoint failed: {e}");
         }
 
-        Ok((
-            "inline".to_string(),
-            base64::engine::general_purpose::STANDARD.encode(&payload.data),
-        ))
+        Ok(normalized)
     }
 
     fn hash_item(&self, item: &ClipboardItem, settings: &AppSettings) -> String {
@@ -445,10 +489,25 @@ impl HistoryStore {
                     continue;
                 }
             }
-            hasher.update(&payload.data);
+            if settings.use_sampling_hash && payload.data.len() > SAMPLING_HASH_THRESHOLD {
+                self.sampling_hash_update(&mut hasher, &payload.data);
+            } else {
+                hasher.update(&payload.data);
+            }
         }
 
         hex::encode(hasher.finalize())
+    }
+
+    fn sampling_hash_update(&self, hasher: &mut Sha256, data: &[u8]) {
+        let len = data.len();
+        hasher.update(&len.to_le_bytes());
+        let head = &data[..SAMPLING_HASH_HEAD_BYTES.min(len)];
+        hasher.update(head);
+        if len > SAMPLING_HASH_HEAD_BYTES + SAMPLING_HASH_TAIL_BYTES {
+            let tail = &data[len - SAMPLING_HASH_TAIL_BYTES..];
+            hasher.update(tail);
+        }
     }
 
     fn prune(&self, max_items: usize) -> rusqlite::Result<()> {
@@ -601,10 +660,10 @@ mod tests {
         store.insert_clip(text_item("hello world")).unwrap();
         store.insert_clip(text_item("foo bar")).unwrap();
 
-        let results = store.search("", 10).unwrap();
+        let results = store.search("", 10, 0).unwrap();
         assert_eq!(results.len(), 2);
 
-        let results = store.search("hello", 10).unwrap();
+        let results = store.search("hello", 10, 0).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].text_preview, "hello world");
 
@@ -617,7 +676,7 @@ mod tests {
         store.insert_clip(text_item("same content")).unwrap();
         store.insert_clip(text_item("same content")).unwrap();
 
-        let results = store.search("", 10).unwrap();
+        let results = store.search("", 10, 0).unwrap();
         assert_eq!(results.len(), 1);
 
         cleanup(&dir);
@@ -628,12 +687,12 @@ mod tests {
         let (store, dir) = temp_store();
         store.insert_clip(text_item("to delete")).unwrap();
 
-        let results = store.search("", 10).unwrap();
+        let results = store.search("", 10, 0).unwrap();
         assert_eq!(results.len(), 1);
         let id = results[0].id.clone();
 
         store.delete_clip(&id).unwrap();
-        let results = store.search("", 10).unwrap();
+        let results = store.search("", 10, 0).unwrap();
         assert_eq!(results.len(), 0);
 
         cleanup(&dir);
@@ -644,12 +703,12 @@ mod tests {
         let (store, dir) = temp_store();
         store.insert_clip(text_item("pinned item")).unwrap();
 
-        let results = store.search("", 10).unwrap();
+        let results = store.search("", 10, 0).unwrap();
         let id = results[0].id.clone();
         assert!(!results[0].is_pinned);
 
         store.pin_clip(&id, true).unwrap();
-        let results = store.search("", 10).unwrap();
+        let results = store.search("", 10, 0).unwrap();
         assert!(results[0].is_pinned);
 
         cleanup(&dir);
@@ -674,8 +733,88 @@ mod tests {
                 .unwrap();
         }
 
-        let results = store.search("", 100).unwrap();
+        let results = store.search("", 100, 0).unwrap();
         assert_eq!(results.len(), 50, "expected 50 items, got {}", results.len());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn sampling_hash_produces_different_hash_than_exact() {
+        let (store, dir) = temp_store();
+        // Create a large payload (>1MB) with unique content in the middle
+        let mut data = vec![0u8; 2 * 1024 * 1024];
+        data[1024 * 1024] = 42; // unique byte in the middle (sampled-out area)
+
+        let item = ClipboardItem {
+            kind: ClipKind::Image,
+            text_preview: "[Image]".to_string(),
+            payloads: vec![ClipboardPayload {
+                uti: "image/png".to_string(),
+                data,
+            }],
+        };
+
+        // Exact hash
+        let exact_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(item.kind.as_str().as_bytes());
+            for p in &item.payloads {
+                hasher.update(p.uti.as_bytes());
+                hasher.update(&p.data);
+            }
+            hex::encode(hasher.finalize())
+        };
+
+        // Sampling hash via store
+        store
+            .save_settings(AppSettings {
+                use_sampling_hash: true,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let sampling_hash = store.hash_item(&item, &store.get_settings().unwrap());
+
+        // The hashes should differ because middle content is unique
+        assert_ne!(exact_hash, sampling_hash);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn sampling_hash_same_content_same_hash() {
+        let (store, dir) = temp_store();
+        store
+            .save_settings(AppSettings {
+                use_sampling_hash: true,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let data = vec![0xABu8; 2 * 1024 * 1024];
+        let item1 = ClipboardItem {
+            kind: ClipKind::Image,
+            text_preview: "[Image]".to_string(),
+            payloads: vec![ClipboardPayload {
+                uti: "image/png".to_string(),
+                data: data.clone(),
+            }],
+        };
+        let item2 = ClipboardItem {
+            kind: ClipKind::Image,
+            text_preview: "[Image]".to_string(),
+            payloads: vec![ClipboardPayload {
+                uti: "image/png".to_string(),
+                data,
+            }],
+        };
+
+        let settings = store.get_settings().unwrap();
+        assert_eq!(
+            store.hash_item(&item1, &settings),
+            store.hash_item(&item2, &settings)
+        );
 
         cleanup(&dir);
     }
@@ -687,12 +826,14 @@ mod tests {
             max_items: 500,
             max_payload_bytes: 10 * 1024 * 1024,
             trim_whitespace_for_text_dedup: false,
+            use_sampling_hash: true,
         };
         store.save_settings(settings).unwrap();
         let loaded = store.get_settings().unwrap();
         assert_eq!(loaded.max_items, 500);
         assert_eq!(loaded.max_payload_bytes, 10 * 1024 * 1024);
         assert!(!loaded.trim_whitespace_for_text_dedup);
+        assert!(loaded.use_sampling_hash);
 
         cleanup(&dir);
     }

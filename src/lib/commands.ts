@@ -15,10 +15,11 @@ export interface AppSettings {
   maxItems: number;
   maxPayloadBytes: number;
   trimWhitespaceForTextDedup: boolean;
+  useSamplingHash: boolean;
 }
 
-export function searchClips(query: string, limit = 40): Promise<ClipSummary[]> {
-  return invoke("search_clips", { query, limit });
+export function searchClips(query: string, limit = 40, offset = 0): Promise<ClipSummary[]> {
+  return invoke("search_clips", { query, limit, offset });
 }
 
 export function pasteClip(id: string): Promise<void> {

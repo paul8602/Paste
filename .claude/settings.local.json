@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(cargo test *)",
+      "Bash(sqlite3 :memory: *)",
+      "Bash(npx tsc *)",
+      "Bash(python3 *)",
+      "Bash(pip3 install *)",
+      "Bash(cargo build *)",
+      "Bash(cargo search *)"
+    ]
+  }
+}
