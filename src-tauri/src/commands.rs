@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 use crate::error::PasteError;
-use crate::history::{AppSettings, ClipSummary};
+use crate::history::{AppSettings, ClipSummary, FilePreview};
 use crate::AppState;
 use crate::PASTE_IN_PROGRESS;
 
@@ -139,6 +139,15 @@ pub fn get_clip_thumbnail(
 ) -> Result<Option<String>, PasteError> {
     let store = state.store.lock().map_err(|_| PasteError::LockPoisoned)?;
     store.get_clip_thumbnail(&id).map_err(PasteError::Store)
+}
+
+#[tauri::command]
+pub fn get_file_preview(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Option<FilePreview>, PasteError> {
+    let store = state.store.lock().map_err(|_| PasteError::LockPoisoned)?;
+    store.get_file_preview(&id).map_err(PasteError::Store)
 }
 
 #[tauri::command]

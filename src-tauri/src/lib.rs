@@ -130,6 +130,7 @@ pub fn run() {
             commands::has_accessibility_permission,
             commands::open_accessibility_settings,
             commands::get_clip_thumbnail,
+            commands::get_file_preview,
             commands::hide_panel
         ])
         .build(tauri::generate_context!())

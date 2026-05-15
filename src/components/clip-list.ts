@@ -1,4 +1,4 @@
-import { type ClipSummary, deleteClip, getClipThumbnail, pinClip } from "../lib/commands";
+import { type ClipSummary, type FilePreview, deleteClip, getClipThumbnail, getFilePreview, pinClip } from "../lib/commands";
 
 export function escapeHtml(value: string): string {
   return value
@@ -20,9 +20,14 @@ function clipKindHtml(kind: ClipSummary["kind"], id: string): string {
   if (kind === "image") {
     return `<img class="clip-thumb" data-clip-id="${escapeHtml(id)}" alt="thumbnail" />`;
   }
+  if (kind === "file_url") {
+    // Placeholder: will be replaced asynchronously via loadFilePreviews
+    return `<span class="clip-file-preview" data-clip-id="${escapeHtml(id)}">
+      <span class="clip-kind file-kind">FILE</span>
+    </span>`;
+  }
   const label = (() => {
     switch (kind) {
-      case "file_url": return "FILE";
       case "html": return "HTML";
       case "rtf": return "RTF";
       case "text": return "TXT";
@@ -30,6 +35,21 @@ function clipKindHtml(kind: ClipSummary["kind"], id: string): string {
     }
   })();
   return `<span class="clip-kind">${label}</span>`;
+}
+
+/**
+ * File type icon mapping — returns a short label for each file_type category.
+ */
+function fileTypeIcon(fileType: string): string {
+  switch (fileType) {
+    case "image": return "IMG";
+    case "document": return "DOC";
+    case "archive": return "ZIP";
+    case "code": return "CODE";
+    case "video": return "VID";
+    case "audio": return "AUD";
+    default: return "FILE";
+  }
 }
 
 export function updateSelection(
@@ -56,6 +76,40 @@ async function loadThumbnails(list: HTMLOListElement): Promise<void> {
       }
     } catch {
       img.replaceWith(createKindBadge("image"));
+    }
+  }
+}
+
+/**
+ * For file_url clips, load file type info and replace placeholder badges
+ * with thumbnails (images) or type-specific labels.
+ */
+async function loadFilePreviews(list: HTMLOListElement): Promise<void> {
+  const placeholders = list.querySelectorAll<HTMLElement>(".clip-file-preview:not([data-loaded])");
+  for (const el of placeholders) {
+    const clipId = el.dataset.clipId;
+    if (!clipId) continue;
+    el.dataset.loaded = "1";
+
+    try {
+      const preview: FilePreview | null = await getFilePreview(clipId);
+      if (!preview) continue;
+
+      if (preview.fileType === "image" && preview.thumbnail) {
+        // Replace with image thumbnail
+        const img = document.createElement("img");
+        img.className = "clip-thumb";
+        img.src = preview.thumbnail;
+        img.alt = preview.fileName;
+        img.title = `${preview.fileName}${preview.fileCount > 1 ? ` (+${preview.fileCount - 1} more)` : ""}`;
+        el.replaceWith(img);
+      } else {
+        // Show type-specific badge
+        const countSuffix = preview.fileCount > 1 ? `+${preview.fileCount - 1}` : "";
+        el.innerHTML = `<span class="clip-kind file-kind file-kind--${preview.fileType}" title="${escapeHtml(preview.fileName)}${countSuffix ? ` (+${preview.fileCount - 1} more)` : ""}">${fileTypeIcon(preview.fileType)}${countSuffix}</span>`;
+      }
+    } catch {
+      // Keep the default FILE badge on error
     }
   }
 }
@@ -182,4 +236,5 @@ export function renderClips(
   }
 
   void loadThumbnails(list);
+  void loadFilePreviews(list);
 }

@@ -177,6 +177,58 @@ button:hover {
   object-fit: cover;
 }
 
+/* File preview placeholders and type badges */
+.clip-file-preview {
+  display: contents;
+}
+
+.file-kind {
+  display: grid;
+  height: 34px;
+  place-items: center;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0 8px;
+  min-width: 48px;
+}
+
+.file-kind--image {
+  color: #101014;
+  background: #ffb3d9;
+}
+
+.file-kind--document {
+  color: #101014;
+  background: #b3d4ff;
+}
+
+.file-kind--archive {
+  color: #101014;
+  background: #ffe0a3;
+}
+
+.file-kind--code {
+  color: #e8e8ed;
+  background: #4a4a5a;
+}
+
+.file-kind--video {
+  color: #101014;
+  background: #c4b3ff;
+}
+
+.file-kind--audio {
+  color: #101014;
+  background: #b3ffe0;
+}
+
+.file-kind--other {
+  color: #e8e8ed;
+  background: #3a3a44;
+}
+
 .clip-body {
   min-width: 0;
 }

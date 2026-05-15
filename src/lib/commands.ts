@@ -54,6 +54,18 @@ export function getClipThumbnail(id: string): Promise<string | null> {
   return invoke("get_clip_thumbnail", { id });
 }
 
+export interface FilePreview {
+  fileType: string;
+  extension: string;
+  thumbnail: string | null;
+  fileCount: number;
+  fileName: string;
+}
+
+export function getFilePreview(id: string): Promise<FilePreview | null> {
+  return invoke("get_file_preview", { id });
+}
+
 export function openAccessibilitySettings(): Promise<void> {
   return invoke("open_accessibility_settings");
 }

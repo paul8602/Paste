@@ -64,6 +64,22 @@ pub struct Clip {
     pub payloads: Vec<ClipboardPayload>,
 }
 
+/// Lightweight file preview info returned to the frontend for file_url clips.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePreview {
+    /// "image", "document", "archive", "code", "video", "audio", or "other"
+    pub file_type: String,
+    /// Lowercase file extension without the dot, e.g. "png", "pdf"
+    pub extension: String,
+    /// Base64 data-URL thumbnail for image files; null for non-image files
+    pub thumbnail: Option<String>,
+    /// Number of files in this clip
+    pub file_count: usize,
+    /// Display name of the first file (filename only)
+    pub file_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -414,6 +430,52 @@ impl HistoryStore {
         )))
     }
 
+    pub fn get_file_preview(&self, id: &str) -> rusqlite::Result<Option<FilePreview>> {
+        let clip = self.get_clip(id)?;
+        if clip.kind != ClipKind::FileUrl {
+            return Ok(None);
+        }
+
+        let file_url_payload = clip.payloads.first();
+        let Some(payload) = file_url_payload else {
+            return Ok(None);
+        };
+
+        let text = String::from_utf8_lossy(&payload.data);
+        let paths: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+        let file_count = paths.len();
+
+        let Some(first_path) = paths.first() else {
+            return Ok(None);
+        };
+
+        let file_name = std::path::Path::new(first_path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| first_path.to_string());
+
+        let extension = std::path::Path::new(first_path)
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+
+        let file_type = classify_file_type(&extension);
+
+        let thumbnail = if file_type == "image" {
+            self.read_image_thumbnail(first_path)
+        } else {
+            None
+        };
+
+        Ok(Some(FilePreview {
+            file_type,
+            extension,
+            thumbnail,
+            file_count,
+            file_name,
+        }))
+    }
+
     pub fn pin_clip(&self, id: &str, pinned: bool) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE clips SET is_pinned = ?2 WHERE id = ?1",
@@ -611,6 +673,63 @@ fn sanitize_uti(value: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Classify a file by its extension into a broad type category for UI display.
+fn classify_file_type(ext: &str) -> String {
+    match ext {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "svg"
+        | "heic" | "heif" | "ico" | "avif" => "image".to_string(),
+        "pdf" => "document".to_string(),
+        "doc" | "docx" | "pages" => "document".to_string(),
+        "xls" | "xlsx" | "numbers" | "csv" => "document".to_string(),
+        "ppt" | "pptx" | "key" => "document".to_string(),
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "dmg" | "iso" => "archive".to_string(),
+        "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v" => "video".to_string(),
+        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio".to_string(),
+        "rs" | "ts" | "js" | "jsx" | "tsx" | "py" | "rb" | "go" | "java" | "c"
+        | "cpp" | "h" | "hpp" | "swift" | "kt" | "sh" | "bash" | "zsh" | "json"
+        | "yaml" | "yml" | "toml" | "xml" | "html" | "css" | "scss" | "sql"
+        | "md" | "r" | "lua" | "php" | "pl" | "dart" => "code".to_string(),
+        _ => "other".to_string(),
+    }
+}
+
+/// Read the first 256KB of an image file and return a base64 data-URL.
+/// Returns None if the file cannot be read or the extension isn't a known image format.
+fn read_image_thumbnail(path_str: &str) -> Option<String> {
+    let ext = std::path::Path::new(path_str)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tiff" | "tif" => "image/tiff",
+        "svg" => "image/svg+xml",
+        "heic" | "heif" => "image/heic",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        _ => return None,
+    };
+
+    // Read up to 512KB to keep memory bounded
+    let data = fs::read(path_str).ok()?;
+    let data = if data.len() > 512 * 1024 {
+        &data[..512 * 1024]
+    } else {
+        &data
+    };
+
+    Some(format!(
+        "data:{};base64,{}",
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(data)
+    ))
 }
 
 fn to_sql_error(error: std::io::Error) -> rusqlite::Error {
