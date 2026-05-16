@@ -1,3 +1,3 @@
 mod store;
 
-pub use store::{AppSettings, Clip, ClipKind, ClipSummary, HistoryStore};
+pub use store::{AppSettings, Clip, ClipKind, ClipSummary, FilePreview, HistoryStore};

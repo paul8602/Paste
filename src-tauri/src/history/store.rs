@@ -462,7 +462,7 @@ impl HistoryStore {
         let file_type = classify_file_type(&extension);
 
         let thumbnail = if file_type == "image" {
-            self.read_image_thumbnail(first_path)
+            read_image_thumbnail(first_path)
         } else {
             None
         };
