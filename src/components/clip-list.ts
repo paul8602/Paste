@@ -169,7 +169,8 @@ export function renderClips(
   onChoose: (index: number) => void,
   onRefresh: () => Promise<void>,
   hasMore = false,
-  onLoadMore?: () => Promise<void>
+  onLoadMore?: () => Promise<void>,
+  onTagClick?: (tagName: string) => void
 ): void {
   list.innerHTML = "";
 
@@ -188,12 +189,15 @@ export function renderClips(
     const displayPreview = highlightMatch(fullPreview, query);
 
     const number = index < 9 ? `${index + 1}` : "";
+    const tagBadges = (clip.tags && clip.tags.length > 0)
+      ? `<span class="clip-tags">${clip.tags.map((t) => `<span class="clip-tag" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</span>`).join("")}</span>`
+      : "";
     item.innerHTML = `
       <span class="clip-number">${number}</span>
       ${clipKindHtml(clip.kind, clip.id)}
       <span class="clip-body" title="${escapeHtml(fullPreview)} · ${timestamp}${clip.isPinned ? " · Pinned" : ""}">
         <strong>${displayPreview}</strong>
-        <small>${timestamp}${clip.isPinned ? " · Pinned" : ""}</small>
+        <small>${timestamp}${clip.isPinned ? " · Pinned" : ""} ${tagBadges}</small>
       </span>
       <button class="pin" title="${clip.isPinned ? "Unpin" : "Pin"}">${clip.isPinned ? "Unpin" : "Pin"}</button>
       <button class="delete" title="Delete">Delete</button>
@@ -216,6 +220,16 @@ export function renderClips(
       event.stopPropagation();
       await deleteClip(clip.id);
       await onRefresh();
+    });
+
+    item.querySelectorAll<HTMLElement>(".clip-tag").forEach((tagEl) => {
+      tagEl.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const tagName = tagEl.dataset.tag;
+        if (tagName && onTagClick) {
+          onTagClick(tagName);
+        }
+      });
     });
 
     list.append(item);

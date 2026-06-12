@@ -10,8 +10,9 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use super::migrations;
 use crate::macos_bridge::{ClipboardItem, ClipboardPayload};
-use crate::search::score_clip;
+use crate::search::{score_clip, parse_search_query, SearchFilters};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +55,8 @@ pub struct ClipSummary {
     pub text_preview: String,
     pub payload_ref: Option<String>,
     pub is_pinned: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +83,95 @@ pub struct FilePreview {
     pub file_name: String,
 }
 
+/// JSON export manifest containing version metadata and all exported clips.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportManifest {
+    pub version: String,
+    pub exported_at: String,
+    pub items: Vec<ExportClip>,
+}
+
+/// A single clip entry in the export manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportClip {
+    pub id: String,
+    pub created_at: String,
+    pub kind: ClipKind,
+    pub text_preview: String,
+    pub payloads: Vec<ExportPayload>,
+    pub is_pinned: bool,
+    pub tags: Vec<String>,
+}
+
+/// A single payload entry in the export manifest (always base64-encoded).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportPayload {
+    pub uti: String,
+    pub data: String,
+}
+
+/// Result returned after an import operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    pub added: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_warning: Option<String>,
+}
+
+/// Disk usage breakdown for the clipboard store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskUsage {
+    pub total_items: usize,
+    pub total_bytes: u64,
+    pub by_type: Vec<TypeBreakdown>,
+    pub by_age: Vec<AgeBreakdown>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeBreakdown {
+    pub kind: String,
+    pub count: usize,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgeBreakdown {
+    pub range: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tag {
+    pub id: i64,
+    pub name: String,
+    pub color: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rule {
+    pub id: i64,
+    pub name: String,
+    pub pattern: String,
+    pub pattern_type: String,
+    pub action: String,
+    pub action_value: Option<String>,
+    pub enabled: bool,
+    pub priority: i64,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -87,6 +179,12 @@ pub struct AppSettings {
     pub max_payload_bytes: usize,
     pub trim_whitespace_for_text_dedup: bool,
     pub use_sampling_hash: bool,
+    #[serde(default = "default_retention_days")]
+    pub retention_days: usize,
+}
+
+fn default_retention_days() -> usize {
+    90
 }
 
 impl Default for AppSettings {
@@ -95,7 +193,8 @@ impl Default for AppSettings {
             max_items: 1000,
             max_payload_bytes: 25 * 1024 * 1024,
             trim_whitespace_for_text_dedup: true,
-            use_sampling_hash: false,
+            use_sampling_hash: true,
+            retention_days: 90,
         }
     }
 }
@@ -108,7 +207,7 @@ pub struct HistoryStore {
 }
 
 const PRUNE_INTERVAL: usize = 10;
-const SAMPLING_HASH_THRESHOLD: usize = 1024 * 1024;
+const SAMPLING_HASH_THRESHOLD: usize = 256 * 1024;
 const SAMPLING_HASH_HEAD_BYTES: usize = 64 * 1024;
 const SAMPLING_HASH_TAIL_BYTES: usize = 64 * 1024;
 
@@ -155,23 +254,50 @@ impl HistoryStore {
             ",
         )?;
 
-        Ok(Self {
+        // Run database migrations
+        let db_path = app_data_dir.join("history.sqlite3");
+        if let Err(e) = migrations::backup_database(&db_path) {
+            tracing::warn!("database backup failed: {e}");
+        }
+        if let Err(e) = migrations::run_migrations(&conn) {
+            tracing::error!("database migration failed: {e}");
+        }
+        migrations::check_integrity(&conn).ok();
+
+        let store = Self {
             conn,
             blobs_dir,
             cached_settings: Mutex::new(None),
             insert_count: Cell::new(0),
-        })
+        };
+
+        // Auto-prune on startup if retention is configured
+        if let Ok(settings) = store.get_settings() {
+            if settings.retention_days > 0 {
+                match store.auto_prune(settings.retention_days) {
+                    Ok(count) if count > 0 => {
+                        tracing::info!("startup auto-prune: removed {count} items older than {} days", settings.retention_days);
+                    }
+                    Err(e) => {
+                        tracing::warn!("startup auto-prune failed: {e}");
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(store)
     }
 
-    pub fn insert_clip(&self, item: ClipboardItem) -> rusqlite::Result<()> {
+    pub fn insert_clip(&self, item: ClipboardItem) -> rusqlite::Result<String> {
         if item.payloads.is_empty() {
-            return Ok(());
+            return Ok(String::new());
         }
 
         let settings = self.get_settings()?;
         let total_payload_bytes = item.payloads.iter().map(|payload| payload.data.len()).sum::<usize>();
         if total_payload_bytes > settings.max_payload_bytes {
-            return Ok(());
+            return Ok(String::new());
         }
 
         let hash = self.hash_item(&item, &settings);
@@ -250,7 +376,7 @@ impl HistoryStore {
             self.prune(settings.max_items)?;
         }
 
-        Ok(())
+        Ok(clip_id)
     }
 
     /// Returns (storage, value) metadata without writing blob files to disk.
@@ -278,9 +404,19 @@ impl HistoryStore {
     }
 
     pub fn search(&self, query: &str, limit: usize, offset: usize) -> rusqlite::Result<Vec<ClipSummary>> {
-        let query = query.trim();
+        let filters = parse_search_query(query);
+        let has_structured = !filters.tags.is_empty()
+            || !filters.exclude_tags.is_empty()
+            || filters.has_tag.is_some()
+            || !filters.types.is_empty()
+            || !filters.exclude_types.is_empty()
+            || filters.date_from.is_some()
+            || filters.date_to.is_some()
+            || filters.pinned.is_some()
+            || filters.min_size.is_some()
+            || filters.max_size.is_some();
 
-        if query.is_empty() {
+        if !has_structured && filters.free_text.is_empty() {
             let mut stmt = self.conn.prepare(
                 "
                 SELECT id, created_at, kind, text_preview, payload_ref, is_pinned
@@ -290,7 +426,7 @@ impl HistoryStore {
                 ",
             )?;
 
-            return stmt
+            let clips: Vec<ClipSummary> = stmt
                 .query_map(params![limit as i64, offset as i64], |row| {
                     Ok(ClipSummary {
                         id: row.get(0)?,
@@ -299,21 +435,101 @@ impl HistoryStore {
                         text_preview: row.get(3)?,
                         payload_ref: row.get(4)?,
                         is_pinned: row.get::<_, i64>(5)? == 1,
+                        tags: Vec::new(),
                     })
                 })?
-                .collect();
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            return self.attach_tags_to_clips(clips);
         }
 
-        let mut stmt = self.conn.prepare(
-            "
-            SELECT id, created_at, kind, text_preview, payload_ref, is_pinned
-            FROM clips
-            ORDER BY is_pinned DESC, created_at DESC
-            ",
-        )?;
+        // Build SQL with structured filters
+        let mut sql = String::from(
+            "SELECT c.id, c.created_at, c.kind, c.text_preview, c.payload_ref, c.is_pinned
+             FROM clips c WHERE 1=1"
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-        let mut clips = stmt
-            .query_map([], |row| {
+        // Tag include filters
+        for tag_name in &filters.tags {
+            let idx = param_values.len() + 1;
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM clip_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.clip_id = c.id AND t.name = ?{idx})"
+            ));
+            param_values.push(Box::new(tag_name.clone()));
+        }
+
+        // Tag exclude filters
+        for tag_name in &filters.exclude_tags {
+            let idx = param_values.len() + 1;
+            sql.push_str(&format!(
+                " AND NOT EXISTS (SELECT 1 FROM clip_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.clip_id = c.id AND t.name = ?{idx})"
+            ));
+            param_values.push(Box::new(tag_name.clone()));
+        }
+
+        // Has any tag
+        if filters.has_tag == Some(true) {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM clip_tags ct WHERE ct.clip_id = c.id)");
+        }
+
+        // Type filters
+        if !filters.types.is_empty() {
+            let placeholders: Vec<String> = filters.types.iter().enumerate()
+                .map(|(i, _)| format!("?{}", param_values.len() + i + 1))
+                .collect();
+            sql.push_str(&format!(" AND c.kind IN ({})", placeholders.join(",")));
+            for t in &filters.types {
+                param_values.push(Box::new(t.clone()));
+            }
+        }
+        for t in &filters.exclude_types {
+            let idx = param_values.len() + 1;
+            sql.push_str(&format!(" AND c.kind != ?{idx}"));
+            param_values.push(Box::new(t.clone()));
+        }
+
+        // Date filters
+        if let Some(ref from) = filters.date_from {
+            let idx = param_values.len() + 1;
+            sql.push_str(&format!(" AND c.created_at >= ?{idx}"));
+            param_values.push(Box::new(from.clone()));
+        }
+        if let Some(ref to) = filters.date_to {
+            let idx = param_values.len() + 1;
+            sql.push_str(&format!(" AND c.created_at <= ?{idx}"));
+            param_values.push(Box::new(to.clone()));
+        }
+
+        // Pinned filter
+        if let Some(pinned) = filters.pinned {
+            let idx = param_values.len() + 1;
+            sql.push_str(&format!(" AND c.is_pinned = ?{idx}"));
+            param_values.push(Box::new(if pinned { 1i64 } else { 0i64 }));
+        }
+
+        // Size filters (based on payload sizes)
+        if filters.min_size.is_some() || filters.max_size.is_some() {
+            sql.push_str(" AND (SELECT COALESCE(SUM(LENGTH(p.value)), 0) FROM payloads p WHERE p.clip_id = c.id AND p.storage = 'inline')");
+            if let Some(min) = filters.min_size {
+                let idx = param_values.len() + 1;
+                sql.push_str(&format!(" >= ?{idx}"));
+                param_values.push(Box::new(min as i64));
+            }
+            if let Some(max) = filters.max_size {
+                let idx = param_values.len() + 1;
+                sql.push_str(&format!(" <= ?{idx}"));
+                param_values.push(Box::new(max as i64));
+            }
+        }
+
+        sql.push_str(" ORDER BY c.is_pinned DESC, c.created_at DESC");
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let mut clips: Vec<ClipSummary> = stmt
+            .query_map(params_ref.as_slice(), |row| {
                 Ok(ClipSummary {
                     id: row.get(0)?,
                     created_at: row.get(1)?,
@@ -321,24 +537,44 @@ impl HistoryStore {
                     text_preview: row.get(3)?,
                     payload_ref: row.get(4)?,
                     is_pinned: row.get::<_, i64>(5)? == 1,
+                    tags: Vec::new(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        clips = clips
-            .into_iter()
-            .filter_map(|clip| score_clip(query, &clip.text_preview).map(|score| (clip, score)))
-            .collect::<Vec<_>>()
-            .sorted_by_score()
-            .into_iter()
-            .map(|(clip, _score)| clip)
-            .collect();
+        // Apply fuzzy text matching on the free-text portion
+        if !filters.free_text.is_empty() {
+            clips = clips
+                .into_iter()
+                .filter_map(|clip| {
+                    score_clip(&filters.free_text, &clip.text_preview).map(|score| (clip, score))
+                })
+                .collect::<Vec<_>>()
+                .sorted_by_score()
+                .into_iter()
+                .map(|(clip, _score)| clip)
+                .collect();
+        }
 
-        // Apply offset + limit in memory for fuzzy search results
+        // Apply offset + limit
         let total = clips.len();
         let start = offset.min(total);
         let end = (start + limit).min(total);
-        Ok(clips[start..end].to_vec())
+        let clips = clips[start..end].to_vec();
+
+        self.attach_tags_to_clips(clips)
+    }
+
+    fn attach_tags_to_clips(&self, mut clips: Vec<ClipSummary>) -> rusqlite::Result<Vec<ClipSummary>> {
+        for clip in &mut clips {
+            let mut stmt = self.conn.prepare(
+                "SELECT t.name FROM tags t INNER JOIN clip_tags ct ON ct.tag_id = t.id WHERE ct.clip_id = ?1 ORDER BY t.name"
+            )?;
+            clip.tags = stmt
+                .query_map(params![clip.id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+        }
+        Ok(clips)
     }
 
     pub fn get_clip(&self, id: &str) -> rusqlite::Result<Clip> {
@@ -513,6 +749,7 @@ impl HistoryStore {
             max_payload_bytes: settings.max_payload_bytes.clamp(1024 * 1024, 500 * 1024 * 1024),
             trim_whitespace_for_text_dedup: settings.trim_whitespace_for_text_dedup,
             use_sampling_hash: settings.use_sampling_hash,
+            retention_days: settings.retention_days,
         };
         let value = serde_json::to_string(&normalized)
             .map_err(|error| to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))?;
@@ -537,6 +774,865 @@ impl HistoryStore {
         }
 
         Ok(normalized)
+    }
+
+    // ── Export / Import ──────────────────────────────────────────────
+
+    /// Export all clips (or a filtered subset) as a JSON manifest string.
+    pub fn export_to_json(
+        &self,
+        ids: Option<Vec<String>>,
+        kind: Option<ClipKind>,
+        date_from: Option<String>,
+        date_to: Option<String>,
+    ) -> rusqlite::Result<String> {
+        let items = self.collect_export_clips(ids, kind, date_from, date_to)?;
+        let manifest = ExportManifest {
+            version: "1.0.7".to_string(),
+            exported_at: OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+            items,
+        };
+        serde_json::to_string_pretty(&manifest)
+            .map_err(|e| to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+    }
+
+    /// Export clips as CSV.
+    /// Columns: id, text_preview, kind, created_at, is_pinned
+    pub fn export_to_csv(
+        &self,
+        ids: Option<Vec<String>>,
+        kind: Option<ClipKind>,
+        date_from: Option<String>,
+        date_to: Option<String>,
+    ) -> rusqlite::Result<String> {
+        let items = self.collect_export_clips(ids, kind, date_from, date_to)?;
+        let mut csv = String::from("\u{FEFF}"); // UTF-8 BOM for Excel
+        csv.push_str("id,text_preview,kind,created_at,is_pinned\n");
+        for item in &items {
+            let escaped = escape_csv(&item.text_preview);
+            csv.push_str(&format!(
+                "{},{},{},{},{}\n",
+                item.id,
+                escaped,
+                item.kind.as_str(),
+                item.created_at,
+                if item.is_pinned { "true" } else { "false" }
+            ));
+        }
+        Ok(csv)
+    }
+
+    /// Import clips from a JSON manifest string.
+    /// `mode`: "merge" (skip duplicates), "replace" (clear first), or "append" (no dedup).
+    /// Returns `ImportResult` with an optional `version_warning` if the manifest is from a newer version.
+    pub fn import_from_json(&self, json: &str, mode: &str) -> rusqlite::Result<ImportResult> {
+        let manifest: ExportManifest = serde_json::from_str(json)
+            .map_err(|e| to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+
+        let version_warning = Self::check_import_version(&manifest.version);
+        if let Some(ref warning) = version_warning {
+            tracing::warn!("{warning}");
+        }
+
+        if mode == "replace" {
+            // Delete all existing clips
+            let ids: Vec<String> = self
+                .conn
+                .prepare("SELECT id FROM clips")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for id in &ids {
+                let _ = self.delete_clip(id);
+            }
+        }
+
+        let mut result = ImportResult {
+            added: 0,
+            skipped: 0,
+            failed: 0,
+            version_warning,
+        };
+
+        for item in &manifest.items {
+            // For merge mode, check if a clip with the same text_preview+kind exists
+            if mode == "merge" {
+                let exists: bool = self
+                    .conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM clips WHERE kind = ?1 AND text_preview = ?2",
+                        params![item.kind.as_str(), item.text_preview],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+                if exists {
+                    result.skipped += 1;
+                    continue;
+                }
+            }
+
+            // Build ClipboardItem and insert
+            let mut payloads: Vec<crate::macos_bridge::ClipboardPayload> = Vec::new();
+            for ep in &item.payloads {
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(&ep.data)
+                    .unwrap_or_default();
+                payloads.push(crate::macos_bridge::ClipboardPayload {
+                    uti: ep.uti.clone(),
+                    data,
+                });
+            }
+
+            if mode == "append" {
+                // Append mode: insert directly with a unique hash to bypass dedup
+                let id = Uuid::new_v4().to_string();
+                let created_at = OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default();
+                let payload_ref = item.payloads.first().map(|p| p.uti.clone());
+
+                if let Err(e) = self.conn.execute(
+                    "INSERT INTO clips (id, created_at, kind, text_preview, payload_ref, pasteboard_hash, is_pinned)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        id, created_at, item.kind.as_str(), item.text_preview,
+                        payload_ref, Uuid::new_v4().to_string(),
+                        if item.is_pinned { 1 } else { 0 },
+                    ],
+                ) {
+                    result.failed += 1;
+                    continue;
+                }
+                for (pos, p) in item.payloads.iter().enumerate() {
+                    let raw = base64::engine::general_purpose::STANDARD
+                        .decode(&p.data)
+                        .unwrap_or_default();
+                    let (storage, value) = if raw.len() > 256 * 1024 {
+                        let file_name = format!("{}-{}.bin", id, sanitize_uti(&p.uti));
+                        let _ = std::fs::write(self.blobs_dir.join(&file_name), &raw);
+                        ("blob".to_string(), file_name)
+                    } else {
+                        ("inline".to_string(), base64::engine::general_purpose::STANDARD.encode(&raw))
+                    };
+                    let _ = self.conn.execute(
+                        "INSERT INTO payloads (clip_id, uti, storage, value, position) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![id, p.uti, storage, value, pos as i64],
+                    );
+                }
+                result.added += 1;
+            } else {
+                let clipboard_item = crate::macos_bridge::ClipboardItem {
+                    kind: item.kind,
+                    text_preview: item.text_preview.clone(),
+                    payloads,
+                };
+                match self.insert_clip(clipboard_item) {
+                    Ok(_) => {
+                        result.added += 1;
+                        if item.is_pinned {
+                            let new_id: Option<String> = self
+                                .conn
+                                .query_row(
+                                    "SELECT id FROM clips WHERE kind = ?1 AND text_preview = ?2 ORDER BY created_at DESC LIMIT 1",
+                                    params![item.kind.as_str(), item.text_preview],
+                                    |row| row.get(0),
+                                )
+                                .optional()?;
+                            if let Some(new_id) = new_id {
+                                let _ = self.pin_clip(&new_id, true);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        result.failed += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Import clips from a CSV string.
+    /// Expected columns: id, text_preview, kind, created_at, is_pinned
+    pub fn import_from_csv(&self, csv_data: &str, mode: &str) -> rusqlite::Result<ImportResult> {
+        let csv_data = csv_data.strip_prefix('\u{FEFF}').unwrap_or(csv_data);
+
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(csv_data.as_bytes());
+
+        if mode == "replace" {
+            let ids: Vec<String> = self
+                .conn
+                .prepare("SELECT id FROM clips")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for id in &ids {
+                let _ = self.delete_clip(id);
+            }
+        }
+
+        let mut result = ImportResult {
+            added: 0,
+            skipped: 0,
+            failed: 0,
+            version_warning: None,
+        };
+
+        for record in reader.records() {
+            let record = match record {
+                Ok(r) => r,
+                Err(_) => {
+                    result.failed += 1;
+                    continue;
+                }
+            };
+
+            let text_preview = record.get(1).unwrap_or("").to_string();
+            let kind_str = record.get(2).unwrap_or("text");
+            let kind = ClipKind::from_str(kind_str);
+            let is_pinned = record.get(4).unwrap_or("false") == "true";
+
+            if mode == "merge" {
+                let exists: bool = self
+                    .conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM clips WHERE kind = ?1 AND text_preview = ?2",
+                        params![kind.as_str(), text_preview],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+                if exists {
+                    result.skipped += 1;
+                    continue;
+                }
+            }
+
+            let id = Uuid::new_v4().to_string();
+            let default_ts = OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default();
+            let created_at = record.get(3).unwrap_or(&default_ts);
+
+            if self
+                .conn
+                .execute(
+                    "INSERT INTO clips (id, created_at, kind, text_preview, payload_ref, pasteboard_hash, is_pinned)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        id,
+                        created_at,
+                        kind.as_str(),
+                        text_preview,
+                        Option::<String>::None,
+                        Uuid::new_v4().to_string(),
+                        if is_pinned { 1 } else { 0 },
+                    ],
+                )
+                .is_err()
+            {
+                result.failed += 1;
+                continue;
+            }
+            result.added += 1;
+        }
+
+        Ok(result)
+    }
+
+    /// Collect clips for export based on optional filters.
+    fn collect_export_clips(
+        &self,
+        ids: Option<Vec<String>>,
+        kind: Option<ClipKind>,
+        date_from: Option<String>,
+        date_to: Option<String>,
+    ) -> rusqlite::Result<Vec<ExportClip>> {
+        let mut sql = String::from(
+            "SELECT id, created_at, kind, text_preview, payload_ref, is_pinned FROM clips WHERE 1=1"
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(ref id_list) = ids {
+            let placeholders: Vec<String> = id_list.iter().enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect();
+            sql.push_str(&format!(" AND id IN ({})", placeholders.join(",")));
+            for id in id_list {
+                param_values.push(Box::new(id.clone()));
+            }
+        }
+        if let Some(ref k) = kind {
+            sql.push_str(&format!(" AND kind = ?{}", param_values.len() + 1));
+            param_values.push(Box::new(k.as_str().to_string()));
+        }
+        if let Some(ref from) = date_from {
+            sql.push_str(&format!(" AND created_at >= ?{}", param_values.len() + 1));
+            param_values.push(Box::new(from.clone()));
+        }
+        if let Some(ref to) = date_to {
+            sql.push_str(&format!(" AND created_at <= ?{}", param_values.len() + 1));
+            param_values.push(Box::new(to.clone()));
+        }
+        sql.push_str(" ORDER BY created_at DESC");
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let summaries = stmt
+            .query_map(params_ref.as_slice(), |row| {
+                Ok(ClipSummary {
+                    id: row.get(0)?,
+                    created_at: row.get(1)?,
+                    kind: ClipKind::from_str(row.get::<_, String>(2)?.as_str()),
+                    text_preview: row.get(3)?,
+                    payload_ref: row.get(4)?,
+                    is_pinned: row.get::<_, i64>(5)? == 1,
+                    tags: Vec::new(),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut items = Vec::with_capacity(summaries.len());
+        for s in &summaries {
+            let clip = self.get_clip(&s.id)?;
+            let payloads: Vec<ExportPayload> = clip
+                .payloads
+                .iter()
+                .map(|p| ExportPayload {
+                    uti: p.uti.clone(),
+                    data: base64::engine::general_purpose::STANDARD.encode(&p.data),
+                })
+                .collect();
+            items.push(ExportClip {
+                id: s.id.clone(),
+                created_at: s.created_at.clone(),
+                kind: s.kind,
+                text_preview: s.text_preview.clone(),
+                payloads,
+                is_pinned: s.is_pinned,
+                tags: Vec::new(),
+            });
+        }
+        Ok(items)
+    }
+
+    // ── Data Management ───────────────────────────────────────────────
+
+    /// Delete clips within a date range. Returns number of items deleted.
+    pub fn delete_by_date_range(&self, from: &str, to: &str) -> rusqlite::Result<usize> {
+        let ids: Vec<String> = self
+            .conn
+            .prepare(
+                "SELECT id FROM clips WHERE created_at >= ?1 AND created_at <= ?2 AND is_pinned = 0"
+            )?
+            .query_map(params![from, to], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let count = ids.len();
+        for id in &ids {
+            let _ = self.delete_clip(id);
+        }
+        Ok(count)
+    }
+
+    /// Count clips within a date range (for preview before deletion).
+    pub fn count_by_date_range(&self, from: &str, to: &str) -> rusqlite::Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM clips WHERE created_at >= ?1 AND created_at <= ?2 AND is_pinned = 0",
+            params![from, to],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Delete clips by a list of ids. Returns number of items deleted.
+    pub fn delete_selected(&self, ids: &[String]) -> rusqlite::Result<usize> {
+        let mut count = 0;
+        for id in ids {
+            if self.delete_clip(id).is_ok() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Delete all clips of a given kind. Returns number of items deleted.
+    pub fn delete_by_type(&self, kind: ClipKind) -> rusqlite::Result<usize> {
+        let ids: Vec<String> = self
+            .conn
+            .prepare("SELECT id FROM clips WHERE kind = ?1 AND is_pinned = 0")?
+            .query_map(params![kind.as_str()], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let count = ids.len();
+        for id in &ids {
+            let _ = self.delete_clip(id);
+        }
+        Ok(count)
+    }
+
+    /// Count clips of a given kind (for preview before deletion).
+    pub fn count_by_type(&self, kind: ClipKind) -> rusqlite::Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM clips WHERE kind = ?1 AND is_pinned = 0",
+            params![kind.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Auto-prune clips older than `retention_days`, skipping pinned items.
+    /// Returns number of items removed. If `retention_days` is 0, does nothing.
+    pub fn auto_prune(&self, retention_days: usize) -> rusqlite::Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = OffsetDateTime::now_utc()
+            .saturating_sub(time::Duration::days(retention_days as i64))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let ids: Vec<String> = self
+            .conn
+            .prepare(
+                "SELECT id FROM clips WHERE created_at < ?1 AND is_pinned = 0"
+            )?
+            .query_map(params![cutoff], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let count = ids.len();
+        for id in &ids {
+            let _ = self.delete_clip(id);
+        }
+        Ok(count)
+    }
+
+    /// Count clips that would be pruned (for preview before auto-prune).
+    pub fn count_prunable(&self, retention_days: usize) -> rusqlite::Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = OffsetDateTime::now_utc()
+            .saturating_sub(time::Duration::days(retention_days as i64))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM clips WHERE created_at < ?1 AND is_pinned = 0",
+            params![cutoff],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    const CURRENT_VERSION: &'static str = "1.0.7";
+
+    fn check_import_version(manifest_version: &str) -> Option<String> {
+        let current: Vec<u32> = Self::CURRENT_VERSION
+            .split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let imported: Vec<u32> = manifest_version
+            .split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if imported > current {
+            Some(format!(
+                "Importing from version {manifest_version} (newer than {0}). Some data may not be fully compatible.",
+                Self::CURRENT_VERSION
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Return disk usage statistics: total count, total bytes, by type, by age.
+    pub fn get_disk_usage(&self) -> rusqlite::Result<DiskUsage> {
+        let total_items: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))?;
+        let total_items_usize: usize = total_items as usize;
+
+        // Total bytes: inline payloads + blob files
+        let inline_bytes: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(value)), 0) FROM payloads WHERE storage = 'inline'",
+                [],
+                |row| row.get(0),
+            )?;
+        let blob_bytes = self
+            .compute_blob_bytes();
+        let total_bytes = inline_bytes as u64 + blob_bytes;
+
+        // By type
+        let mut by_type_stmt = self.conn.prepare(
+            "SELECT kind, COUNT(*), COALESCE(SUM(LENGTH(p.value)), 0)
+             FROM clips c
+             LEFT JOIN payloads p ON p.clip_id = c.id AND p.storage = 'inline'
+             GROUP BY c.kind
+             ORDER BY COUNT(*) DESC"
+        )?;
+        let mut by_type: Vec<TypeBreakdown> = by_type_stmt
+            .query_map([], |row| {
+                let kind: String = row.get(0)?;
+                let count_i64: i64 = row.get(1)?;
+                let bytes: u64 = row.get::<_, i64>(2)? as u64;
+                Ok(TypeBreakdown { kind, count: count_i64 as usize, bytes })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Add blob bytes proportionally to each type
+        let type_count = by_type.len();
+        for bt in &mut by_type {
+            if total_items > 0 && type_count > 0 {
+                bt.bytes += (blob_bytes * bt.count as u64) / total_items as u64;
+            }
+        }
+
+        // By age
+        let now = OffsetDateTime::now_utc();
+        let threshold_30 = now.saturating_sub(time::Duration::days(30))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let threshold_90 = now.saturating_sub(time::Duration::days(90))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+
+        let count_lt_30: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM clips WHERE created_at >= ?1",
+            params![threshold_30],
+            |row| row.get(0),
+        )?;
+        let count_30_90: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM clips WHERE created_at >= ?1 AND created_at < ?2",
+            params![threshold_90, threshold_30],
+            |row| row.get(0),
+        )?;
+        let count_gt_90: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM clips WHERE created_at < ?1",
+            params![threshold_90],
+            |row| row.get(0),
+        )?;
+
+        let by_age = vec![
+            AgeBreakdown { range: "<30 days".to_string(), count: count_lt_30 as usize },
+            AgeBreakdown { range: "30-90 days".to_string(), count: count_30_90 as usize },
+            AgeBreakdown { range: ">90 days".to_string(), count: count_gt_90 as usize },
+        ];
+
+        Ok(DiskUsage { total_items: total_items_usize, total_bytes, by_type, by_age })
+    }
+
+    // ── Tags CRUD ────────────────────────────────────────────────────
+
+    pub fn create_tag(&self, name: &str, color: Option<&str>) -> rusqlite::Result<Tag> {
+        self.conn.execute(
+            "INSERT INTO tags (name, color) VALUES (?1, ?2)",
+            params![name, color],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.conn.query_row(
+            "SELECT id, name, color, created_at FROM tags WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(Tag {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    color: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            },
+        )
+    }
+
+    pub fn list_tags(&self) -> rusqlite::Result<Vec<Tag>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, color, created_at FROM tags ORDER BY name")?;
+        let tags = stmt
+            .query_map([], |row| {
+                Ok(Tag {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    color: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(tags)
+    }
+
+    pub fn delete_tag(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn
+            .execute("DELETE FROM tags WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn update_tag(&self, id: i64, name: &str, color: Option<&str>) -> rusqlite::Result<Tag> {
+        self.conn.execute(
+            "UPDATE tags SET name = ?1, color = ?2 WHERE id = ?3",
+            params![name, color, id],
+        )?;
+        self.conn.query_row(
+            "SELECT id, name, color, created_at FROM tags WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(Tag {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    color: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            },
+        )
+    }
+
+    pub fn add_tag_to_clip(&self, clip_id: &str, tag_id: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO clip_tags (clip_id, tag_id) VALUES (?1, ?2)",
+            params![clip_id, tag_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_tag_from_clip(&self, clip_id: &str, tag_id: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM clip_tags WHERE clip_id = ?1 AND tag_id = ?2",
+            params![clip_id, tag_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_clip_tags(&self, clip_id: &str) -> rusqlite::Result<Vec<Tag>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.name, t.color, t.created_at FROM tags t
+             INNER JOIN clip_tags ct ON ct.tag_id = t.id
+             WHERE ct.clip_id = ?1 ORDER BY t.name",
+        )?;
+        let tags = stmt
+            .query_map(params![clip_id], |row| {
+                Ok(Tag {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    color: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(tags)
+    }
+
+    // ── Rules CRUD ───────────────────────────────────────────────────
+
+    pub fn create_rule(
+        &self,
+        name: &str,
+        pattern: &str,
+        pattern_type: &str,
+        action: &str,
+        action_value: Option<&str>,
+    ) -> rusqlite::Result<Rule> {
+        self.conn.execute(
+            "INSERT INTO rules (name, pattern, pattern_type, action, action_value)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![name, pattern, pattern_type, action, action_value],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.get_rule(id)
+    }
+
+    pub fn get_rule(&self, id: i64) -> rusqlite::Result<Rule> {
+        self.conn.query_row(
+            "SELECT id, name, pattern, pattern_type, action, action_value, enabled, priority, created_at
+             FROM rules WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(Rule {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    pattern: row.get(2)?,
+                    pattern_type: row.get(3)?,
+                    action: row.get(4)?,
+                    action_value: row.get(5)?,
+                    enabled: row.get::<_, i64>(6)? == 1,
+                    priority: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            },
+        )
+    }
+
+    pub fn list_rules(&self) -> rusqlite::Result<Vec<Rule>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, pattern, pattern_type, action, action_value, enabled, priority, created_at
+             FROM rules ORDER BY priority DESC, name",
+        )?;
+        let rules = stmt
+            .query_map([], |row| {
+                Ok(Rule {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    pattern: row.get(2)?,
+                    pattern_type: row.get(3)?,
+                    action: row.get(4)?,
+                    action_value: row.get(5)?,
+                    enabled: row.get::<_, i64>(6)? == 1,
+                    priority: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rules)
+    }
+
+    pub fn get_enabled_rules(&self) -> rusqlite::Result<Vec<Rule>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, pattern, pattern_type, action, action_value, enabled, priority, created_at
+             FROM rules WHERE enabled = 1 ORDER BY priority DESC",
+        )?;
+        let rules = stmt
+            .query_map([], |row| {
+                Ok(Rule {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    pattern: row.get(2)?,
+                    pattern_type: row.get(3)?,
+                    action: row.get(4)?,
+                    action_value: row.get(5)?,
+                    enabled: row.get::<_, i64>(6)? == 1,
+                    priority: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rules)
+    }
+
+    pub fn update_rule(
+        &self,
+        id: i64,
+        name: &str,
+        pattern: &str,
+        pattern_type: &str,
+        action: &str,
+        action_value: Option<&str>,
+        enabled: bool,
+        priority: i64,
+    ) -> rusqlite::Result<Rule> {
+        self.conn.execute(
+            "UPDATE rules SET name = ?1, pattern = ?2, pattern_type = ?3, action = ?4,
+             action_value = ?5, enabled = ?6, priority = ?7 WHERE id = ?8",
+            params![
+                name,
+                pattern,
+                pattern_type,
+                action,
+                action_value,
+                enabled as i64,
+                priority,
+                id
+            ],
+        )?;
+        self.get_rule(id)
+    }
+
+    pub fn delete_rule(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn
+            .execute("DELETE FROM rules WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Execute all enabled rules against a clip. Returns the actions taken.
+    pub fn apply_rules(&self, clip_id: &str, text_preview: &str, kind: &str) -> rusqlite::Result<Vec<String>> {
+        let rules = self.get_enabled_rules()?;
+        let mut actions_taken = Vec::new();
+
+        for rule in &rules {
+            if !self.matches_rule(text_preview, kind, &rule.pattern, &rule.pattern_type) {
+                continue;
+            }
+
+            match rule.action.as_str() {
+                "tag" => {
+                    if let Some(ref tag_name) = rule.action_value {
+                        // Find or create the tag
+                        let tag_id = match self.conn.query_row(
+                            "SELECT id FROM tags WHERE name = ?1",
+                            params![tag_name],
+                            |row| row.get::<_, i64>(0),
+                        ) {
+                            Ok(id) => id,
+                            Err(_) => {
+                                // Auto-create the tag
+                                self.conn.execute(
+                                    "INSERT INTO tags (name) VALUES (?1)",
+                                    params![tag_name],
+                                )?;
+                                self.conn.last_insert_rowid()
+                            }
+                        };
+                        let _ = self.add_tag_to_clip(clip_id, tag_id);
+                        actions_taken.push(format!("tagged:{}", tag_name));
+                    }
+                }
+                "delete" => {
+                    let _ = self.delete_clip(clip_id);
+                    actions_taken.push("deleted".to_string());
+                    return Ok(actions_taken); // Stop processing further rules
+                }
+                "notify" => {
+                    let msg = rule.action_value.as_deref().unwrap_or("Rule matched");
+                    actions_taken.push(format!("notify:{}", msg));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(actions_taken)
+    }
+
+    fn matches_rule(&self, text: &str, kind: &str, pattern: &str, pattern_type: &str) -> bool {
+        match pattern_type {
+            "regex" => {
+                if let Ok(re) = regex::Regex::new(pattern) {
+                    re.is_match(text)
+                } else {
+                    false
+                }
+            }
+            "literal" => text.contains(pattern),
+            "url" => {
+                if kind == "file_url" || text.starts_with("http") {
+                    text.contains(pattern)
+                } else {
+                    false
+                }
+            }
+            "email" => {
+                if let Ok(re) = regex::Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}") {
+                    if pattern.starts_with('@') {
+                        // Match domain part
+                        re.find(text).map_or(false, |m| m.as_str().ends_with(pattern))
+                    } else {
+                        re.is_match(text) && text.contains(pattern)
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Compute total size of blob files on disk.
+    fn compute_blob_bytes(&self) -> u64 {
+        let mut total: u64 = 0;
+        if let Ok(entries) = std::fs::read_dir(&self.blobs_dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    total += meta.len();
+                }
+            }
+        }
+        total
     }
 
     fn hash_item(&self, item: &ClipboardItem, settings: &AppSettings) -> String {
@@ -655,6 +1751,15 @@ fn uti_to_mime(uti: &str) -> &'static str {
         "image/heic"
     } else {
         "image/png"
+    }
+}
+
+/// Escape special characters for CSV output (RFC 4180).
+fn escape_csv(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
     }
 }
 
@@ -946,6 +2051,7 @@ mod tests {
             max_payload_bytes: 10 * 1024 * 1024,
             trim_whitespace_for_text_dedup: false,
             use_sampling_hash: true,
+            retention_days: 90,
         };
         store.save_settings(settings).unwrap();
         let loaded = store.get_settings().unwrap();
@@ -953,6 +2059,299 @@ mod tests {
         assert_eq!(loaded.max_payload_bytes, 10 * 1024 * 1024);
         assert!(!loaded.trim_whitespace_for_text_dedup);
         assert!(loaded.use_sampling_hash);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn export_json_roundtrip() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("hello world")).unwrap();
+        store.insert_clip(text_item("foo bar")).unwrap();
+
+        let json = store.export_to_json(None, None, None, None).unwrap();
+        assert!(json.contains("hello world"));
+        assert!(json.contains("foo bar"));
+        assert!(json.contains("\"version\": \"1.0.7\""));
+
+        // Round-trip: export → import (replace mode)
+        let result = store.import_from_json(&json, "replace").unwrap();
+        assert!(result.added >= 2, "expected at least 2 added, got {}", result.added);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn export_csv_contains_expected_columns() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("test, with, commas")).unwrap();
+
+        let csv = store.export_to_csv(None, None, None, None).unwrap();
+        // Should have BOM
+        assert!(csv.starts_with('\u{FEFF}'));
+        // Should have header
+        assert!(csv.contains("id,text_preview,kind,created_at,is_pinned"));
+        // CSV escaping
+        assert!(csv.contains('"'));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn import_merge_skips_duplicates() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("unique item")).unwrap();
+
+        let json = store.export_to_json(None, None, None, None).unwrap();
+        // Merge should skip the existing item
+        let result = store.import_from_json(&json, "merge").unwrap();
+        assert_eq!(result.skipped, 1);
+        assert_eq!(result.added, 0);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn import_append_adds_duplicates() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item_with_data("dup", "content1")).unwrap();
+
+        let json = store.export_to_json(None, None, None, None).unwrap();
+        let result = store.import_from_json(&json, "append").unwrap();
+        assert!(result.added > 0);
+
+        // Should now have 2 items
+        let results = store.search("", 10, 0).unwrap();
+        assert_eq!(results.len(), 2);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn import_replace_clears_first() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item_with_data("old1", "data1")).unwrap();
+        store.insert_clip(text_item_with_data("old2", "data2")).unwrap();
+
+        // Export only one item, then replace — should leave only that one
+        let ids: Vec<String> = store
+            .search("old1", 1, 0)
+            .unwrap()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        let json = store
+            .export_to_json(Some(ids), None, None, None)
+            .unwrap();
+        let result = store.import_from_json(&json, "replace").unwrap();
+        assert_eq!(result.added, 1);
+
+        let results = store.search("", 10, 0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].text_preview, "old1");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn delete_by_date_range() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item_with_data("item", "data-1")).unwrap();
+        store.insert_clip(text_item_with_data("item", "data-2")).unwrap();
+
+        // Delete all items in a wide date range
+        let from = "2000-01-01T00:00:00Z";
+        let to = "2100-01-01T00:00:00Z";
+        let count = store.delete_by_date_range(from, to).unwrap();
+        assert_eq!(count, 2);
+
+        let results = store.search("", 10, 0).unwrap();
+        assert_eq!(results.len(), 0);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn delete_selected() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item_with_data("keep", "data-keep")).unwrap();
+        store.insert_clip(text_item_with_data("del", "data-del")).unwrap();
+
+        let all = store.search("", 10, 0).unwrap();
+        let del_ids: Vec<String> = all
+            .iter()
+            .filter(|c| c.text_preview.contains("del"))
+            .map(|c| c.id.clone())
+            .collect();
+
+        let count = store.delete_selected(&del_ids).unwrap();
+        assert_eq!(count, 1);
+
+        let results = store.search("", 10, 0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].text_preview, "keep");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn delete_by_type_only_removes_target_kind() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("text clip")).unwrap();
+
+        // Insert an image clip
+        let image_item = ClipboardItem {
+            kind: ClipKind::Image,
+            text_preview: "[Image]".to_string(),
+            payloads: vec![ClipboardPayload {
+                uti: "image/png".to_string(),
+                data: vec![1, 2, 3],
+            }],
+        };
+        store.insert_clip(image_item).unwrap();
+
+        // Delete only image type
+        let count = store.delete_by_type(ClipKind::Image).unwrap();
+        assert_eq!(count, 1);
+
+        let results = store.search("", 10, 0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].kind, ClipKind::Text);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn auto_prune_respects_retention() {
+        let (store, dir) = temp_store();
+        store
+            .save_settings(AppSettings {
+                retention_days: 90,
+                ..Default::default()
+            })
+            .unwrap();
+
+        store.insert_clip(text_item_with_data("recent", "data-recent")).unwrap();
+
+        // With 0 retention days, nothing is pruned
+        let count = store.auto_prune(0).unwrap();
+        assert_eq!(count, 0);
+
+        // With very large retention (9999 days), recent items survive
+        let count = store.auto_prune(9999).unwrap();
+        assert_eq!(count, 0);
+
+        // Recent items should still exist
+        let results = store.search("", 10, 0).unwrap();
+        assert_eq!(results.len(), 1);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn disk_usage_reports_stats() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("hello")).unwrap();
+        store.insert_clip(text_item("world")).unwrap();
+
+        let usage = store.get_disk_usage().unwrap();
+        assert_eq!(usage.total_items, 2);
+        assert!(usage.total_bytes > 0);
+        assert!(!usage.by_type.is_empty());
+        assert_eq!(usage.by_age.len(), 3);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn count_by_type_returns_correct_count() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("text1")).unwrap();
+        store.insert_clip(text_item("text2")).unwrap();
+
+        let image_item = ClipboardItem {
+            kind: ClipKind::Image,
+            text_preview: "[Image]".to_string(),
+            payloads: vec![ClipboardPayload {
+                uti: "image/png".to_string(),
+                data: vec![1, 2, 3],
+            }],
+        };
+        store.insert_clip(image_item).unwrap();
+
+        assert_eq!(store.count_by_type(ClipKind::Text).unwrap(), 2);
+        assert_eq!(store.count_by_type(ClipKind::Image).unwrap(), 1);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn count_by_date_range_returns_correct_count() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("item1")).unwrap();
+        store.insert_clip(text_item("item2")).unwrap();
+
+        let count = store.count_by_date_range("2000-01-01T00:00:00Z", "2100-01-01T00:00:00Z").unwrap();
+        assert_eq!(count, 2);
+
+        let count = store.count_by_date_range("2000-01-01T00:00:00Z", "2000-01-02T00:00:00Z").unwrap();
+        assert_eq!(count, 0);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn count_prunable_returns_correct_count() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("recent")).unwrap();
+
+        assert_eq!(store.count_prunable(0).unwrap(), 0);
+        assert_eq!(store.count_prunable(9999).unwrap(), 0);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn import_version_warning_for_newer_version() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("test")).unwrap();
+
+        let mut json = store.export_to_json(None, None, None, None).unwrap();
+        json = json.replace("\"1.0.7\"", "\"2.0.0\"");
+
+        let result = store.import_from_json(&json, "merge").unwrap();
+        assert!(result.version_warning.is_some());
+        assert!(result.version_warning.unwrap().contains("2.0.0"));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn import_no_warning_for_same_version() {
+        let (store, dir) = temp_store();
+        store.insert_clip(text_item("test")).unwrap();
+
+        let json = store.export_to_json(None, None, None, None).unwrap();
+        let result = store.import_from_json(&json, "merge").unwrap();
+        assert!(result.version_warning.is_none());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn settings_retention_days_default() {
+        let (store, dir) = temp_store();
+        let settings = store.get_settings().unwrap();
+        assert_eq!(settings.retention_days, 90);
+
+        store
+            .save_settings(AppSettings {
+                retention_days: 365,
+                ..Default::default()
+            })
+            .unwrap();
+        let settings = store.get_settings().unwrap();
+        assert_eq!(settings.retention_days, 365);
 
         cleanup(&dir);
     }

@@ -1,3 +1,7 @@
-mod store;
+mod migrations;
+pub(crate) mod store;
 
-pub use store::{AppSettings, Clip, ClipKind, ClipSummary, FilePreview, HistoryStore};
+pub use store::{
+    AppSettings, Clip, ClipKind, ClipSummary, DiskUsage,
+    FilePreview, HistoryStore, ImportResult, Rule, Tag,
+};

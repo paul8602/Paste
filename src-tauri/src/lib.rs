@@ -33,11 +33,20 @@ fn show_panel(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 pub fn run() {
+    let log_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("Paste")
+        .join("logs");
+    std::fs::create_dir_all(&log_dir).ok();
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "paste.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .with_writer(tracing_subscriber::fmt::writer::MakeWriterExt::and(non_blocking, std::io::stderr))
         .init();
 
     tauri::Builder::default()
@@ -131,7 +140,32 @@ pub fn run() {
             commands::open_accessibility_settings,
             commands::get_clip_thumbnail,
             commands::get_file_preview,
-            commands::hide_panel
+            commands::hide_panel,
+            commands::export_to_json,
+            commands::export_to_csv,
+            commands::import_from_json,
+            commands::delete_by_date_range,
+            commands::delete_selected,
+            commands::delete_by_type,
+            commands::auto_prune,
+            commands::count_by_type,
+            commands::count_by_date_range,
+            commands::count_prunable,
+            commands::get_disk_usage,
+            commands::import_from_csv,
+            commands::create_tag,
+            commands::list_tags,
+            commands::delete_tag,
+            commands::add_tag_to_clip,
+            commands::remove_tag_from_clip,
+            commands::get_clip_tags,
+            commands::create_rule,
+            commands::list_rules,
+            commands::update_rule,
+            commands::delete_rule,
+            commands::update_tag,
+            commands::apply_rules_to_clip,
+            commands::batch_apply_rules
         ])
         .build(tauri::generate_context!())
         .expect("error building Paste")

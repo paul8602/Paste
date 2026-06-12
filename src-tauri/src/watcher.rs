@@ -45,8 +45,23 @@ pub fn start_clipboard_watcher(
             }
 
             if let Ok(store) = store.lock() {
-                if let Err(error) = store.insert_clip(item) {
-                    tracing::error!("failed to save clipboard item: {error}");
+                match store.insert_clip(item) {
+                    Ok(clip_id) => {
+                        if !clip_id.is_empty() {
+                            // Apply rules on the newly inserted clip
+                            if let Ok(clips) = store.search("", 1, 0) {
+                                if let Some(latest) = clips.first() {
+                                    let kind_str = latest.kind.as_str().to_string();
+                                    if let Err(e) = store.apply_rules(&clip_id, &latest.text_preview, &kind_str) {
+                                        tracing::warn!("rule execution failed: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!("failed to save clipboard item: {error}");
+                    }
                 }
             }
 

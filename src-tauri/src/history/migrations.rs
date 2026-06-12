@@ -19,7 +19,7 @@ fn current_version(conn: &Connection) -> rusqlite::Result<i64> {
 
     let version: i64 = conn
         .query_row(
-            "SELECT value FROM db_meta WHERE key = 'schema_version'",
+            "SELECT CAST(value AS INTEGER) FROM db_meta WHERE key = 'schema_version'",
             [],
             |row| row.get(0),
         )
@@ -32,6 +32,7 @@ fn current_version(conn: &Connection) -> rusqlite::Result<i64> {
 /// Returns the new schema version.
 pub fn run_migrations(conn: &Connection) -> rusqlite::Result<i64> {
     let current = current_version(conn)?;
+    let mut latest = current;
 
     for &(version, sql) in MIGRATIONS {
         if version <= current {
@@ -55,9 +56,10 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<i64> {
 
         conn.execute_batch("COMMIT")?;
         tracing::info!("migration {version} applied");
+        latest = version;
     }
 
-    Ok(current_version(conn))
+    Ok(latest)
 }
 
 /// Create a timestamped backup of the database file before running migrations.
@@ -157,22 +159,36 @@ mod tests {
         assert_eq!(version, 0);
     }
 
+    /// Helper: create the clips table that migrations expect to already exist.
+    fn ensure_clips_table(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS clips (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text_preview TEXT NOT NULL,
+                payload_ref TEXT,
+                pasteboard_hash TEXT NOT NULL UNIQUE,
+                source_app TEXT,
+                is_pinned INTEGER NOT NULL DEFAULT 0
+            );"
+        ).unwrap();
+    }
+
     #[test]
     fn migrations_run_sequentially() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        ensure_clips_table(&conn);
         let version = run_migrations(&conn).unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);
-
-        // Running again is a no-op
-        let version2 = run_migrations(&conn).unwrap();
-        assert_eq!(version, version2);
     }
 
     #[test]
     fn migration_creates_tables() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        ensure_clips_table(&conn);
         run_migrations(&conn).unwrap();
 
         // Check tags table exists

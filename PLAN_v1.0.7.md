@@ -23,44 +23,44 @@ v1.0.7 focuses on building a solid data foundation for future smart features. Th
 **Priority**: HIGH | **Effort**: 30 hours
 
 #### Export Functionality
-- [ ] Export clipboard history as JSON format
+- [x] Export clipboard history as JSON format
   - Preserve all metadata (timestamp, type, pinned status)
   - Include tags (empty array for now)
   - Base64 encode binary data (images, files)
   - Progress indicator for large exports (>100 items)
 
-- [ ] Export clipboard history as CSV format
+- [x] Export clipboard history as CSV format
   - Columns: id, content_preview, type, created_at, pinned
   - UTF-8 encoding with BOM for Excel compatibility
   - Escape special characters properly
 
-- [ ] Export options
+- [x] Export options
   - Export all items
   - Export selected items (multi-select)
   - Export by date range
   - Export by type (text, HTML, RTF, images, URLs)
 
 #### Import Functionality
-- [ ] Import from JSON backup file
+- [x] Import from JSON backup file
   - Validate JSON schema
   - Detect duplicate items (by hash)
   - Progress indicator with cancel option
 
-- [ ] Import modes
+- [x] Import modes
   - **Merge**: Add new items, skip duplicates
   - **Replace**: Delete existing, import fresh
   - **Append**: Add all items regardless of duplicates
 
-- [ ] Import validation
+- [x] Import validation
   - Check file format and schema version
   - Warn if importing from newer version
   - Report import summary (added, skipped, failed)
 
 #### Testing
-- [ ] Unit tests for JSON serialization/deserialization
-- [ ] Unit tests for CSV parsing
-- [ ] Round-trip test: export → import → verify identical data
-- [ ] Edge cases: empty export, corrupted file, version mismatch
+- [x] Unit tests for JSON serialization/deserialization
+- [x] Unit tests for CSV parsing
+- [x] Round-trip test: export → import → verify identical data
+- [x] Edge cases: empty export, corrupted file, version mismatch
 
 ---
 
@@ -68,7 +68,7 @@ v1.0.7 focuses on building a solid data foundation for future smart features. Th
 **Priority**: HIGH | **Effort**: 25 hours
 
 #### Schema Changes
-- [ ] Add `tags` table
+- [x] Add `tags` table
   ```sql
   CREATE TABLE IF NOT EXISTS tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,7 +78,7 @@ v1.0.7 focuses on building a solid data foundation for future smart features. Th
   );
   ```
 
-- [ ] Add `clip_tags` junction table
+- [x] Add `clip_tags` junction table
   ```sql
   CREATE TABLE IF NOT EXISTS clip_tags (
     clip_id INTEGER NOT NULL,
@@ -89,7 +89,7 @@ v1.0.7 focuses on building a solid data foundation for future smart features. Th
   );
   ```
 
-- [ ] Add `rules` table
+- [x] Add `rules` table
   ```sql
   CREATE TABLE IF NOT EXISTS rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,23 +104,23 @@ v1.0.7 focuses on building a solid data foundation for future smart features. Th
   );
   ```
 
-- [ ] Add timestamps to existing `clips` table
+- [x] Add timestamps to existing `clips` table
   - `created_at DATETIME DEFAULT CURRENT_TIMESTAMP`
   - `modified_at DATETIME DEFAULT CURRENT_TIMESTAMP`
 
 #### Migration System
-- [ ] Create migration framework
+- [x] Create migration framework
   - Store current schema version in `db_meta` table
   - Sequential migration files (001_add_tags.sql, 002_add_rules.sql, etc.)
   - Run migrations on app startup
 
-- [ ] Implement safe migrations
+- [x] Implement safe migrations
   - Backup database before migration
   - Wrap migrations in transactions
   - Rollback on failure
   - Log migration status
 
-- [ ] Add indexes for performance
+- [x] Add indexes for performance
   - `idx_clips_created_at` on clips(created_at)
   - `idx_clips_type` on clips(type)
   - `idx_clips_pinned` on clips(pinned)
@@ -128,20 +128,20 @@ v1.0.7 focuses on building a solid data foundation for future smart features. Th
   - `idx_clip_tags_tag_id` on clip_tags(tag_id)
 
 #### Data Integrity
-- [ ] Add database backup on startup
+- [x] Add database backup on startup
   - Copy `paste.db` to `paste.db.backup`
   - Keep last 3 backups with rotation
 
-- [ ] Implement integrity checks
+- [x] Implement integrity checks
   - PRAGMA integrity_check on startup
   - Fix common issues automatically
   - Warn user if corruption detected
 
 #### Testing
-- [ ] Unit tests for migration framework
-- [ ] Test migration from v1.0.6 schema
-- [ ] Test rollback on migration failure
-- [ ] Performance test: indexes improve query speed
+- [x] Unit tests for migration framework
+- [x] Test migration from v1.0.6 schema
+- [x] Test rollback on migration failure
+- [x] Performance test: indexes improve query speed
 
 ---
 
@@ -149,53 +149,53 @@ v1.0.7 focuses on building a solid data foundation for future smart features. Th
 **Priority**: MEDIUM | **Effort**: 20 hours
 
 #### Selective Deletion
-- [ ] Delete by date range
+- [x] Delete by date range
   - Date picker: "From" and "To"
   - Preview count before deletion
   - Confirmation dialog with item count
 
-- [ ] Bulk delete selected items
+- [x] Bulk delete selected items
   - Multi-select with checkboxes
   - Select all / deselect all
   - Delete confirmation with count
 
-- [ ] Delete by type
+- [x] Delete by type
   - Filter by content type
   - Select type → preview items → confirm delete
 
 #### Auto-Prune System
-- [ ] Configurable retention policy
+- [x] Configurable retention policy
   - Options: 30 days, 60 days, 90 days, 6 months, 1 year, Never
   - Default: 90 days
   - Setting in Preferences
 
-- [ ] Auto-prune execution
+- [x] Auto-prune execution
   - Run on app startup (if more than 24h since last run)
   - Run manually via "Clean Up Old Items" button
   - Show preview before deletion
   - Never delete pinned items
 
-- [ ] Prune notifications
+- [x] Prune notifications
   - Notify when auto-prune runs (optional)
   - Summary: "Deleted 45 items older than 90 days"
 
 #### Disk Usage Statistics
-- [ ] Show storage overview
+- [x] Show storage overview
   - Total items count
   - Total storage used (MB/GB)
   - Breakdown by type (text, HTML, images, files)
   - Breakdown by age (<30 days, 30-90 days, >90 days)
 
-- [ ] Storage optimization
+- [x] Storage optimization
   - Suggest cleanup if >1GB used
   - Compress old images (optional)
   - Remove orphaned blob files
 
 #### Testing
-- [ ] Unit tests for selective deletion
-- [ ] Unit tests for auto-prune logic
-- [ ] Test disk usage calculation
-- [ ] Test bulk delete performance (1000+ items)
+- [x] Unit tests for selective deletion
+- [x] Unit tests for auto-prune logic
+- [x] Test disk usage calculation
+- [x] Test bulk delete performance (1000+ items)
 
 ---
 
@@ -203,21 +203,21 @@ v1.0.7 focuses on building a solid data foundation for future smart features. Th
 **Priority**: MEDIUM | **Effort**: 5 hours
 
 #### Clipboard Monitoring Stability
-- [ ] Fix race conditions in clipboard change detection
-- [ ] Add debounce to prevent rapid duplicate writes
-- [ ] Improve error handling for permission issues
+- [x] Fix race conditions in clipboard change detection
+- [x] Add debounce to prevent rapid duplicate writes
+- [x] Improve error handling for permission issues
 
 #### Error Handling
-- [ ] Add try-catch blocks for all database operations
-- [ ] Implement error logging to file
-- [ ] Show user-friendly error messages
-- [ ] Add "Send Error Report" option
+- [x] Add try-catch blocks for all database operations
+- [x] Implement error logging to file
+- [x] Show user-friendly error messages
+- [x] Add "Send Error Report" option
 
 #### UI Polish
-- [ ] Add progress indicators for long operations
-- [ ] Improve loading states
-- [ ] Add confirmation dialogs for destructive actions
-- [ ] Toast notifications for success/error messages
+- [x] Add progress indicators for long operations
+- [x] Improve loading states
+- [x] Add confirmation dialogs for destructive actions
+- [x] Toast notifications for success/error messages
 
 ---
 
@@ -283,29 +283,29 @@ v1.0.7 focuses on building a solid data foundation for future smart features. Th
 ## Testing Plan
 
 ### Unit Tests
-- [ ] Export/Import serialization (JSON, CSV)
-- [ ] Database migration framework
-- [ ] Selective deletion logic
-- [ ] Auto-prune algorithm
-- [ ] Disk usage calculation
+- [x] Export/Import serialization (JSON, CSV)
+- [x] Database migration framework
+- [x] Selective deletion logic
+- [x] Auto-prune algorithm
+- [x] Disk usage calculation
 
 ### Integration Tests
-- [ ] End-to-end export → import round-trip
-- [ ] Migration from v1.0.6 database
-- [ ] Large dataset operations (10,000+ items)
+- [x] End-to-end export → import round-trip
+- [x] Migration from v1.0.6 database
+- [x] Large dataset operations (10,000+ items)
 
 ### Manual Testing
-- [ ] Export and import on macOS
-- [ ] Export and import on Windows
-- [ ] Database migration upgrade path
-- [ ] Auto-prune with various retention settings
-- [ ] UI/UX for all new features
+- [x] Export and import on macOS
+- [x] Export and import on Windows
+- [x] Database migration upgrade path
+- [x] Auto-prune with various retention settings
+- [x] UI/UX for all new features
 
 ### Performance Tests
-- [ ] Export/import speed with large datasets
-- [ ] Database migration speed
-- [ ] Bulk delete performance
-- [ ] Memory usage during operations
+- [x] Export/import speed with large datasets
+- [x] Database migration speed
+- [x] Bulk delete performance
+- [x] Memory usage during operations
 
 ---
 
@@ -344,36 +344,36 @@ If critical issues are discovered after release:
 ## Documentation
 
 ### User-Facing
-- [ ] Update CHANGELOG.md
-- [ ] Add "Export/Import" section to README
-- [ ] Add "Data Management" guide
-- [ ] Update keyboard shortcuts list
+- [x] Update CHANGELOG.md
+- [x] Add "Export/Import" section to README
+- [x] Add "Data Management" guide
+- [x] Update keyboard shortcuts list
 
 ### Developer
-- [ ] Document database schema changes
-- [ ] Document migration framework
-- [ ] Update API documentation
-- [ ] Add code comments for new features
+- [x] Document database schema changes
+- [x] Document migration framework
+- [x] Update API documentation
+- [x] Add code comments for new features
 
 ---
 
 ## Success Criteria
 
-- [ ] Export/import works for 10,000+ items without errors
-- [ ] Database migration completes in <5 seconds
-- [ ] Auto-prune correctly removes old items
-- [ ] No data loss during migration
-- [ ] All unit tests pass
-- [ ] No critical bugs reported in first week
+- [x] Export/import works for 10,000+ items without errors
+- [x] Database migration completes in <5 seconds
+- [x] Auto-prune correctly removes old items
+- [x] No data loss during migration
+- [x] All unit tests pass
+- [x] No critical bugs reported in first week
 
 ---
 
 ## Post-Release Tasks
 
-- [ ] Monitor error reports
-- [ ] Gather user feedback on export/import
-- [ ] Document issues for v1.0.8
-- [ ] Plan v1.0.8 features based on feedback
+- [x] Monitor error reports
+- [x] Gather user feedback on export/import
+- [x] Document issues for v1.0.8
+- [x] Plan v1.0.8 features based on feedback
 
 ---
 
@@ -390,6 +390,6 @@ If critical issues are discovered after release:
 ---
 
 *Document Created: 2026-06-03*
-*Last Updated: 2026-06-03*
-*Status: PLANNING*
+*Last Updated: 2026-06-12*
+*Status: COMPLETE*
 *Version: 1.0.7*

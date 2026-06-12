@@ -5,6 +5,7 @@ export interface SettingsElements {
   maxSizeInput: HTMLInputElement;
   trimDedupInput: HTMLInputElement;
   samplingHashInput: HTMLInputElement;
+  retentionDaysInput: HTMLInputElement;
 }
 
 export function renderSettings(settings: AppSettings, elements: SettingsElements): void {
@@ -12,6 +13,7 @@ export function renderSettings(settings: AppSettings, elements: SettingsElements
   elements.maxSizeInput.value = String(Math.round(settings.maxPayloadBytes / 1024 / 1024));
   elements.trimDedupInput.checked = settings.trimWhitespaceForTextDedup;
   elements.samplingHashInput.checked = settings.useSamplingHash;
+  elements.retentionDaysInput.value = String(settings.retentionDays);
 }
 
 export function setupSettings(
@@ -32,7 +34,8 @@ export function setupSettings(
       maxItems: Number(elements.maxItemsInput.value),
       maxPayloadBytes: Number(elements.maxSizeInput.value) * 1024 * 1024,
       trimWhitespaceForTextDedup: elements.trimDedupInput.checked,
-      useSamplingHash: elements.samplingHashInput.checked
+      useSamplingHash: elements.samplingHashInput.checked,
+      retentionDays: Number(elements.retentionDaysInput.value)
     });
     form.classList.add("hidden");
     onSaved(settings);
