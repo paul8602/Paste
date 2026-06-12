@@ -34,7 +34,8 @@ import {
   pasteClip,
   pinClip,
   searchClips,
-  updateRule
+  updateRule,
+  verifyDatabase
 } from "./lib/commands";
 import { renderClips, updateSelection } from "./components/clip-list";
 import { renderSettings, setupSettings } from "./components/settings";
@@ -56,7 +57,7 @@ let settings: AppSettings = {
   maxItems: 1000,
   maxPayloadBytes: 25 * 1024 * 1024,
   trimWhitespaceForTextDedup: true,
-  useSamplingHash: false,
+  useSamplingHash: true,
   retentionDays: 90
 };
 
@@ -180,9 +181,9 @@ app.innerHTML = `
         <input id="trim-dedup" type="checkbox" />
         Trim whitespace for text deduplication
       </label>
-      <label class="checkbox">
+        <label class="checkbox">
         <input id="sampling-hash" type="checkbox" />
-        Sampling hash for large items (&gt;1MB, faster but may miss duplicates)
+        Sampling hash for large items (&gt;256KB, faster but may miss duplicates)
       </label>
       <h3>Export / Import</h3>
       <div class="export-filters">
@@ -295,7 +296,9 @@ app.innerHTML = `
       <h3>About</h3>
       <div class="settings-actions">
         <button type="button" id="copy-error-report">Copy Error Report</button>
+        <button type="button" id="verify-database">Verify Database</button>
       </div>
+      <div id="verify-result" class="import-result hidden"></div>
       <button type="submit" class="primary">Save Settings</button>
     </form>
   </section>
@@ -765,12 +768,12 @@ copyErrorReportBtn.addEventListener("click", async () => {
     const s = settings;
     const report = [
       "=== Paste Error Report ===",
-      `Version: 1.0.7`,
+      `Version: 1.0.9`,
       `Platform: ${navigator.platform}`,
       `User Agent: ${navigator.userAgent}`,
       `Total Items: ${usage.totalItems}`,
       `Total Storage: ${(usage.totalBytes / 1024 / 1024).toFixed(1)} MB`,
-      `Settings: maxItems=${s.maxItems}, maxPayload=${Math.round(s.maxPayloadBytes / 1024 / 1024)}MB, retention=${s.retentionDays}d`,
+      `Settings: maxItems=${s.maxItems}, maxPayload=${Math.round(s.maxPayloadBytes / 1024 / 1024)}MB, retention=${s.retentionDays}d, samplingHash=${s.useSamplingHash}`,
       `Log Directory: ~/Library/Application Support/Paste/logs/`,
       `Time: ${new Date().toISOString()}`,
     ].join("\n");
@@ -778,6 +781,27 @@ copyErrorReportBtn.addEventListener("click", async () => {
     showToast("Error report copied to clipboard", "success");
   } catch (error) {
     showToast(`Failed to copy report: ${error}`, "error");
+  }
+});
+
+const verifyDatabaseBtn = document.querySelector<HTMLButtonElement>("#verify-database")!;
+const verifyResult = document.querySelector<HTMLDivElement>("#verify-result")!;
+verifyDatabaseBtn.addEventListener("click", async () => {
+  try {
+    showLoading("Verifying database…");
+    const report = await verifyDatabase();
+    hideLoading();
+    verifyResult.classList.remove("hidden");
+    if (report.ok) {
+      verifyResult.textContent = `Database OK. Cleaned ${report.orphanedBlobs} orphaned blob(s).`;
+      verifyResult.className = "import-result success";
+    } else {
+      verifyResult.textContent = `Issue found: ${report.message}. Cleaned ${report.orphanedBlobs} orphaned blob(s).`;
+      verifyResult.className = "import-result error";
+    }
+  } catch (error) {
+    hideLoading();
+    showToast(`Verification failed: ${error}`, "error");
   }
 });
 

@@ -1,6 +1,6 @@
 [package]
 name = "paste"
-version = "1.0.8"
+version = "1.0.9"
 description = "Keyboard-first clipboard history for macOS and Windows"
 authors = ["Paste"]
 edition = "2021"

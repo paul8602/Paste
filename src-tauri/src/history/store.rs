@@ -2,6 +2,8 @@ use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 
 use base64::Engine;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -151,6 +153,14 @@ pub struct AgeBreakdown {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct IntegrityReport {
+    pub ok: bool,
+    pub message: String,
+    pub orphaned_blobs: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Tag {
     pub id: i64,
     pub name: String,
@@ -264,12 +274,18 @@ impl HistoryStore {
         }
         migrations::check_integrity(&conn).ok();
 
+        // WAL checkpoint on startup to bound WAL file growth
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").ok();
+
         let store = Self {
             conn,
             blobs_dir,
             cached_settings: Mutex::new(None),
             insert_count: Cell::new(0),
         };
+
+        // Cleanup orphaned blob files on startup
+        store.cleanup_orphaned_blobs().ok();
 
         // Auto-prune on startup if retention is configured
         if let Ok(settings) = store.get_settings() {
@@ -299,6 +315,22 @@ impl HistoryStore {
         if total_payload_bytes > settings.max_payload_bytes {
             return Ok(String::new());
         }
+
+        // Retry on SQLITE_BUSY up to 3 times with backoff
+        for attempt in 0..3u32 {
+            match self.try_insert_clip(&item, &settings) {
+                Ok(id) => return Ok(id),
+                Err(e) if attempt < 2 && is_sqlite_busy(&e) => {
+                    thread::sleep(Duration::from_millis(50 * (attempt + 1) as u64));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    fn try_insert_clip(&self, item: &ClipboardItem, settings: &AppSettings) -> rusqlite::Result<String> {
 
         let hash = self.hash_item(&item, &settings);
         let id = Uuid::new_v4().to_string();
@@ -374,6 +406,8 @@ impl HistoryStore {
         if count >= PRUNE_INTERVAL {
             self.insert_count.set(0);
             self.prune(settings.max_items)?;
+            // Periodic WAL checkpoint to bound WAL file growth
+            self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").ok();
         }
 
         Ok(clip_id)
@@ -525,6 +559,13 @@ impl HistoryStore {
 
         sql.push_str(" ORDER BY c.is_pinned DESC, c.created_at DESC");
 
+        // If we have free-text, fetch more rows than needed for fuzzy scoring
+        // but still bound the SQL result set
+        if !filters.free_text.is_empty() {
+            let fetch_limit = ((offset + limit) * 5).max(500);
+            sql.push_str(&format!(" LIMIT {fetch_limit}"));
+        }
+
         let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
         let mut stmt = self.conn.prepare(&sql)?;
 
@@ -566,13 +607,29 @@ impl HistoryStore {
     }
 
     fn attach_tags_to_clips(&self, mut clips: Vec<ClipSummary>) -> rusqlite::Result<Vec<ClipSummary>> {
+        if clips.is_empty() {
+            return Ok(clips);
+        }
+        let ids: Vec<String> = clips.iter().map(|c| c.id.clone()).collect();
+        let placeholders: Vec<String> = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+        let sql = format!(
+            "SELECT ct.clip_id, t.name FROM tags t
+             INNER JOIN clip_tags ct ON ct.tag_id = t.id
+             WHERE ct.clip_id IN ({})
+             ORDER BY t.name",
+            placeholders.join(",")
+        );
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> = ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut tag_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        let rows = stmt.query_map(params_ref.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows.flatten() {
+            tag_map.entry(row.0).or_default().push(row.1);
+        }
         for clip in &mut clips {
-            let mut stmt = self.conn.prepare(
-                "SELECT t.name FROM tags t INNER JOIN clip_tags ct ON ct.tag_id = t.id WHERE ct.clip_id = ?1 ORDER BY t.name"
-            )?;
-            clip.tags = stmt
-                .query_map(params![clip.id], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            clip.tags = tag_map.remove(&clip.id).unwrap_or_default();
         }
         Ok(clips)
     }
@@ -1635,6 +1692,45 @@ impl HistoryStore {
         total
     }
 
+    /// Run integrity check and cleanup, returning a report.
+    pub fn verify_integrity(&self) -> rusqlite::Result<IntegrityReport> {
+        let result: String = self
+            .conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        let orphaned = self.cleanup_orphaned_blobs().unwrap_or(0);
+        Ok(IntegrityReport {
+            ok: result == "ok",
+            message: result,
+            orphaned_blobs: orphaned,
+        })
+    }
+
+    /// Remove blob files that have no corresponding payload row in the database.
+    fn cleanup_orphaned_blobs(&self) -> rusqlite::Result<usize> {
+        let mut stmt = self.conn.prepare("SELECT value FROM payloads WHERE storage = 'blob'")?;
+        let referenced: std::collections::HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut removed = 0;
+        if let Ok(entries) = std::fs::read_dir(&self.blobs_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if !referenced.contains(name) {
+                        if std::fs::remove_file(entry.path()).is_ok() {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::info!("cleanup_orphaned_blobs: removed {removed} orphaned blob files");
+        }
+        Ok(removed)
+    }
+
     fn hash_item(&self, item: &ClipboardItem, settings: &AppSettings) -> String {
         let mut hasher = Sha256::new();
         hasher.update(item.kind.as_str().as_bytes());
@@ -1839,6 +1935,10 @@ fn read_image_thumbnail(path_str: &str) -> Option<String> {
 
 fn to_sql_error(error: std::io::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
+    matches!(err, rusqlite::Error::SqliteFailure(_, Some(ref msg)) if msg.contains("locked") || msg.contains("busy"))
 }
 
 #[cfg(test)]

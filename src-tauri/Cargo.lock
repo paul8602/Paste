@@ -2615,7 +2615,7 @@ dependencies = [
 
 [[package]]
 name = "paste"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "base64 0.21.7",
  "block",

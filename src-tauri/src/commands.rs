@@ -6,7 +6,8 @@ use tauri::{AppHandle, Manager};
 
 use crate::error::PasteError;
 use crate::history::{
-    AppSettings, ClipKind, ClipSummary, DiskUsage, FilePreview, ImportResult, Rule, Tag,
+    AppSettings, ClipKind, ClipSummary, DiskUsage, FilePreview, ImportResult,
+    IntegrityReport, Rule, Tag,
 };
 use crate::AppState;
 use crate::PASTE_IN_PROGRESS;
@@ -467,4 +468,13 @@ pub fn batch_apply_rules(
         }
     }
     Ok(processed)
+}
+
+#[tauri::command]
+pub fn verify_database(
+    state: tauri::State<'_, AppState>,
+) -> Result<IntegrityReport, PasteError> {
+    let store = state.store.lock().map_err(|_| PasteError::LockPoisoned)?;
+    let report = store.verify_integrity().map_err(PasteError::Store)?;
+    Ok(report)
 }

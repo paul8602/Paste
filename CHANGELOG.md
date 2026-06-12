@@ -4,6 +4,25 @@ All notable changes to Paste are documented in this file.
 
 ---
 
+## [1.0.9] — 2026-07-15
+
+### Added
+
+- **Database verification** — "Verify Database" button in Settings > About runs `PRAGMA integrity_check`, cleans up orphaned blob files, and reports results. Auto-repair via `REINDEX` if corruption detected.
+- **Orphaned blob cleanup** — on startup, blob files with no corresponding database record are automatically removed.
+- **Clipboard read retry** — watcher retries clipboard read once with 100ms backoff on transient failures.
+- **SQLITE_BUSY retry** — `insert_clip` retries up to 3 times with exponential backoff when the database is locked.
+
+### Changed
+
+- **Sampling hash enabled by default** — `use_sampling_hash` now defaults to `true` for new installations. Large items (>256KB) use sampling hash (head 64KB + tail 64KB + length) for 75% faster deduplication.
+- **WAL checkpoint on startup** — `PRAGMA wal_checkpoint(TRUNCATE)` runs at app startup to bound WAL file growth. Periodic checkpoint also runs every 10 inserts alongside the existing prune cycle.
+- **Auto-repair on integrity failure** — if `PRAGMA integrity_check` fails at startup, the system automatically attempts `REINDEX` and re-checks.
+- **Tag query optimization** — `attach_tags_to_clips()` now uses a single batched JOIN query instead of N+1 per-clip queries.
+- **Search SQL optimization** — structured-filter queries now include a SQL `LIMIT` clause (5x requested page size) to avoid fetching all rows when combined with free-text fuzzy matching.
+
+---
+
 ## [1.0.8] — 2026-07-01
 
 ### Added

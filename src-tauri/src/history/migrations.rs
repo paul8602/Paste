@@ -136,11 +136,25 @@ fn rotate_backups(dir: &std::path::Path, keep: usize) -> std::io::Result<()> {
 }
 
 /// Run PRAGMA integrity_check and log the result.
+/// If integrity check fails, attempt auto-repair via REINDEX.
 pub fn check_integrity(conn: &Connection) -> rusqlite::Result<()> {
     let result: String =
         conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     if result != "ok" {
         tracing::warn!("integrity check returned: {result}");
+        tracing::info!("attempting auto-repair via REINDEX");
+        if let Err(e) = conn.execute_batch("REINDEX") {
+            tracing::error!("REINDEX failed: {e}");
+        } else {
+            // Re-check after repair
+            let recheck: String =
+                conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            if recheck == "ok" {
+                tracing::info!("auto-repair via REINDEX succeeded");
+            } else {
+                tracing::error!("auto-repair failed, integrity still: {recheck}");
+            }
+        }
     } else {
         tracing::info!("database integrity check passed");
     }

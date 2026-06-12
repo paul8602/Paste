@@ -165,7 +165,8 @@ pub fn run() {
             commands::delete_rule,
             commands::update_tag,
             commands::apply_rules_to_clip,
-            commands::batch_apply_rules
+            commands::batch_apply_rules,
+            commands::verify_database
         ])
         .build(tauri::generate_context!())
         .expect("error building Paste")

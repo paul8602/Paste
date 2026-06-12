@@ -36,8 +36,17 @@ pub fn start_clipboard_watcher(
 
             last_change_count = change_count;
 
-            let Ok(Some(item)) = bridge.read_clip() else {
-                continue;
+            let item = match bridge.read_clip() {
+                Ok(Some(item)) => item,
+                Ok(None) => continue,
+                Err(_) => {
+                    // Retry with backoff
+                    thread::sleep(Duration::from_millis(100));
+                    match bridge.read_clip() {
+                        Ok(Some(item)) => item,
+                        _ => continue,
+                    }
+                }
             };
 
             if paste_in_progress.load(Ordering::SeqCst) {

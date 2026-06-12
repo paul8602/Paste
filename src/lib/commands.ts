@@ -249,3 +249,13 @@ export function applyRulesToClip(clipId: string): Promise<string[]> {
 export function batchApplyRules(): Promise<number> {
   return invoke("batch_apply_rules");
 }
+
+export interface IntegrityReport {
+  ok: boolean;
+  message: string;
+  orphanedBlobs: number;
+}
+
+export function verifyDatabase(): Promise<IntegrityReport> {
+  return invoke("verify_database");
+}
