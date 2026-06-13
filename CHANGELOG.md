@@ -4,6 +4,22 @@ All notable changes to Paste are documented in this file.
 
 ---
 
+## [1.1.0] — 2026-08-01
+
+### Added
+
+- **Dark/Light theme toggle** — system-aware theme that follows OS dark/light mode, with manual override cycling (System → Dark → Light → System). Theme preference persists across restarts. CSS custom properties for all colors ensure consistent theming.
+- **Compact mode** — toggle from the header bar reduces clip item height by ~35%, showing more items on screen. Preference persists across restarts.
+- **Clip preview modal** — right-click a clip and select "View Full Content" to open a full-screen preview modal. Shows rendered content (text or image), metadata (timestamp, type, pin status, tags), and action buttons (Copy, Paste, Pin, Close).
+- **Accessibility improvements** — ARIA attributes on clip list (`role="listbox"`, `aria-selected`), search input (`aria-label`), context menu (`role="menu"`), preview modal (`role="dialog"`, `aria-modal`), and footer (`aria-label`). Updated keyboard shortcut hints to show all available shortcuts.
+
+### Changed
+
+- **CSS custom properties** — all colors now use CSS variables (`--text`, `--bg-panel`, `--border`, etc.) enabling proper dark/light theming. Dark theme is the default.
+- **Search row grid** — updated to 4-column grid to accommodate compact and theme toggle buttons.
+
+---
+
 ## [1.0.9] — 2026-07-15
 
 ### Added

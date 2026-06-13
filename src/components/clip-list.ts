@@ -183,6 +183,8 @@ export function renderClips(
     const item = document.createElement("li");
     item.className = `clip ${index === selectedIndex ? "selected" : ""}`;
     item.dataset.id = clip.id;
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", index === selectedIndex ? "true" : "false");
 
     const timestamp = new Date(clip.createdAt).toLocaleString();
     const fullPreview = clip.textPreview || "(empty item)";

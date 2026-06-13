@@ -22,6 +22,7 @@ import {
   deleteTag,
   exportToCsv,
   exportToJson,
+  getClipThumbnail,
   getDiskUsage,
   getSettings,
   hasAccessibilityPermission,
@@ -119,9 +120,10 @@ app.innerHTML = `
     <div class="loading-spinner"></div>
     <span id="loading-message" class="loading-message">Processing…</span>
   </div>
-  <div id="context-menu" class="context-menu hidden">
+  <div id="context-menu" class="context-menu hidden" role="menu" aria-label="Clip actions">
     <button data-action="paste">Paste to Active App</button>
     <button data-action="copy">Copy to Clipboard</button>
+    <button data-action="view">View Full Content</button>
     <button data-action="pin">Pin/Unpin</button>
     <button data-action="tags">Edit Tags…</button>
     <button data-action="export">Export Item</button>
@@ -136,6 +138,21 @@ app.innerHTML = `
       </div>
     </div>
   </div>
+  <div id="preview-overlay" class="preview-overlay hidden" role="dialog" aria-label="Clip preview" aria-modal="true">
+    <div class="preview-modal">
+      <div class="preview-header">
+        <h3 id="preview-title">Preview</h3>
+        <div class="preview-actions">
+          <button id="preview-copy" type="button">Copy</button>
+          <button id="preview-paste" type="button">Paste</button>
+          <button id="preview-pin" type="button">Pin</button>
+          <button id="preview-close" type="button">Close</button>
+        </div>
+      </div>
+      <div id="preview-content" class="preview-content"></div>
+      <div id="preview-meta" class="preview-meta"></div>
+    </div>
+  </div>
   <section class="panel">
     <div id="permission" class="permission hidden">
       Grant Accessibility permission in System Settings to paste into other apps.
@@ -143,16 +160,21 @@ app.innerHTML = `
     </div>
     <header class="search-row">
       <div class="search-icon">⌘</div>
-      <input id="search" type="search" placeholder="Search clipboard history" autofocus />
+      <input id="search" type="search" placeholder="Search clipboard history" autofocus aria-label="Search clipboard history" />
       <span class="search-spinner" hidden></span>
       <button id="select-toggle" title="Select items">Select</button>
+      <button id="compact-toggle" title="Toggle compact mode">Compact</button>
+      <button id="theme-toggle" title="Toggle theme">Theme</button>
       <button id="settings-toggle" title="Settings">Settings</button>
     </header>
-    <ol id="clips" class="clip-list"></ol>
-    <footer class="shortcut-hints">
+    <ol id="clips" class="clip-list" role="listbox" aria-label="Clipboard history"></ol>
+    <footer class="shortcut-hints" aria-label="Keyboard shortcuts">
       <span><kbd>↑↓</kbd> Navigate</span>
       <span><kbd>1-9</kbd> Quick paste</span>
       <span><kbd>Enter</kbd> Paste</span>
+      <span><kbd>Del</kbd> Delete</span>
+      <span><kbd>Cmd+F</kbd> Search</span>
+      <span><kbd>Shift+Enter</kbd> Select mode</span>
       <span><kbd>Esc</kbd> Close</span>
     </footer>
     <div id="select-bar" class="select-bar hidden">
@@ -420,6 +442,16 @@ const createRuleBtn = document.querySelector<HTMLButtonElement>("#create-rule-bt
 const rulesList = document.querySelector<HTMLDivElement>("#rules-list")!;
 const batchApplyRulesBtn = document.querySelector<HTMLButtonElement>("#batch-apply-rules")!;
 const selectToggle = document.querySelector<HTMLButtonElement>("#select-toggle")!;
+const themeToggle = document.querySelector<HTMLButtonElement>("#theme-toggle")!;
+const compactToggle = document.querySelector<HTMLButtonElement>("#compact-toggle")!;
+const previewOverlay = document.querySelector<HTMLDivElement>("#preview-overlay")!;
+const previewTitle = document.querySelector<HTMLHeadingElement>("#preview-title")!;
+const previewContent = document.querySelector<HTMLDivElement>("#preview-content")!;
+const previewMeta = document.querySelector<HTMLDivElement>("#preview-meta")!;
+const previewCopyBtn = document.querySelector<HTMLButtonElement>("#preview-copy")!;
+const previewPasteBtn = document.querySelector<HTMLButtonElement>("#preview-paste")!;
+const previewPinBtn = document.querySelector<HTMLButtonElement>("#preview-pin")!;
+const previewCloseBtn = document.querySelector<HTMLButtonElement>("#preview-close")!;
 const selectBar = document.querySelector<HTMLDivElement>("#select-bar")!;
 const selectCount = document.querySelector<HTMLSpanElement>("#select-count")!;
 const selectAllBtn = document.querySelector<HTMLButtonElement>("#select-all")!;
@@ -1010,6 +1042,133 @@ document.addEventListener("click", (e) => {
     searchHistoryEl.classList.add("hidden");
   }
 });
+
+// ── Theme toggle ─────────────────────────────────────────────────
+
+type Theme = "system" | "dark" | "light";
+const THEME_KEY = "paste-theme";
+
+function getTheme(): Theme {
+  return (localStorage.getItem(THEME_KEY) as Theme) ?? "system";
+}
+
+function applyTheme(theme: Theme): void {
+  if (theme === "system") {
+    document.documentElement.removeAttribute("data-theme");
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.setAttribute("data-theme", prefersDark ? "dark" : "light");
+  } else {
+    document.documentElement.setAttribute("data-theme", theme);
+  }
+  themeToggle.textContent = theme === "system" ? "Theme" : theme === "dark" ? "Dark" : "Light";
+}
+
+themeToggle.addEventListener("click", () => {
+  const current = getTheme();
+  const next: Theme = current === "system" ? "dark" : current === "dark" ? "light" : "system";
+  localStorage.setItem(THEME_KEY, next);
+  applyTheme(next);
+});
+
+applyTheme(getTheme());
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  if (getTheme() === "system") applyTheme("system");
+});
+
+// ── Compact mode ─────────────────────────────────────────────────
+
+const COMPACT_KEY = "paste-compact";
+
+function getCompact(): boolean {
+  return localStorage.getItem(COMPACT_KEY) === "true";
+}
+
+function applyCompact(compact: boolean): void {
+  document.documentElement.setAttribute("data-compact", String(compact));
+  compactToggle.textContent = compact ? "Normal" : "Compact";
+}
+
+compactToggle.addEventListener("click", () => {
+  const next = !getCompact();
+  localStorage.setItem(COMPACT_KEY, String(next));
+  applyCompact(next);
+});
+
+applyCompact(getCompact());
+
+// ── Preview modal ────────────────────────────────────────────────
+
+let previewClipId: string | null = null;
+
+function showPreview(clipId: string): void {
+  const clip = clips.find((c) => c.id === clipId);
+  if (!clip) return;
+  previewClipId = clipId;
+
+  previewTitle.textContent = clip.kind.toUpperCase();
+  const timestamp = new Date(clip.createdAt).toLocaleString();
+
+  if (clip.kind === "image") {
+    getClipThumbnail(clipId).then((dataUrl) => {
+      previewContent.className = "preview-content preview-image";
+      previewContent.innerHTML = dataUrl
+        ? `<img src="${dataUrl}" alt="clip image" />`
+        : "<em>Image not available</em>";
+    });
+  } else {
+    previewContent.className = "preview-content";
+    previewContent.textContent = clip.textPreview || "(empty item)";
+  }
+
+  const tagHtml = clip.tags.length > 0
+    ? `<span>Tags: ${clip.tags.join(", ")}</span>`
+    : "";
+  previewMeta.innerHTML = `
+    <span>${timestamp}</span>
+    <span>${clip.kind}</span>
+    ${clip.isPinned ? "<span>Pinned</span>" : ""}
+    ${tagHtml}
+  `;
+
+  previewPinBtn.textContent = clip.isPinned ? "Unpin" : "Pin";
+  previewOverlay.classList.remove("hidden");
+}
+
+function closePreview(): void {
+  previewOverlay.classList.add("hidden");
+  previewClipId = null;
+}
+
+previewCloseBtn.addEventListener("click", closePreview);
+
+previewOverlay.addEventListener("click", (e) => {
+  if (e.target === previewOverlay) closePreview();
+});
+
+previewCopyBtn.addEventListener("click", async () => {
+  if (!previewClipId) return;
+  const clip = clips.find((c) => c.id === previewClipId);
+  if (clip) {
+    await navigator.clipboard.writeText(clip.textPreview);
+    showToast("Copied to clipboard", "success");
+  }
+});
+
+previewPasteBtn.addEventListener("click", async () => {
+  if (!previewClipId) return;
+  await pasteClip(previewClipId);
+  closePreview();
+});
+
+previewPinBtn.addEventListener("click", async () => {
+  if (!previewClipId) return;
+  const clip = clips.find((c) => c.id === previewClipId);
+  if (clip) {
+    await pinClip(previewClipId, !clip.isPinned);
+    closePreview();
+    await refresh();
+  }
+});
 searchInput.addEventListener("input", () => {
   clearTimeout(searchDebounce);
   searchDebounce = setTimeout(async () => {
@@ -1081,6 +1240,9 @@ contextMenu.addEventListener("click", async (event) => {
     }
     case "tags":
       showToast("Tag editing: use Settings > Tags", "info");
+      break;
+    case "view":
+      showPreview(clipId);
       break;
     case "export": {
       const clip = clips.find((c) => c.id === clipId);
