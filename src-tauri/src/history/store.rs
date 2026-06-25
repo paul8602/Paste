@@ -777,6 +777,68 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Update the text content of a text-type clip.
+    pub fn update_clip_text(&self, id: &str, new_text: &str) -> rusqlite::Result<()> {
+        let kind: String = self.conn.query_row(
+            "SELECT kind FROM clips WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if kind != "text" {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "only text clips can be edited".to_string(),
+            ));
+        }
+
+        let settings = self.get_settings()?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"text");
+        if settings.trim_whitespace_for_text_dedup {
+            hasher.update(new_text.trim().as_bytes());
+        } else {
+            hasher.update(new_text.as_bytes());
+        }
+        let new_hash = hex::encode(hasher.finalize());
+
+        let collision: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM clips WHERE pasteboard_hash = ?1 AND id != ?2",
+            params![new_hash, id],
+            |row| row.get(0),
+        )?;
+        if collision {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "another clip with the same content already exists".to_string(),
+            ));
+        }
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(new_text.as_bytes());
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> rusqlite::Result<()> {
+            self.conn.execute(
+                "UPDATE clips SET text_preview = ?2, pasteboard_hash = ?3 WHERE id = ?1",
+                params![id, new_text, new_hash],
+            )?;
+            self.conn.execute(
+                "UPDATE payloads SET value = ?2, storage = 'inline'
+                 WHERE clip_id = ?1 AND uti = 'public.utf8-plain-text'",
+                params![id, encoded],
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     pub fn get_settings(&self) -> rusqlite::Result<AppSettings> {
         if let Ok(guard) = self.cached_settings.lock() {
             if let Some(ref settings) = *guard {

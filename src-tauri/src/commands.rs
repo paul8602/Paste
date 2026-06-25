@@ -478,3 +478,13 @@ pub fn verify_database(
     let report = store.verify_integrity().map_err(PasteError::Store)?;
     Ok(report)
 }
+
+#[tauri::command]
+pub fn update_clip_text(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    text: String,
+) -> Result<(), PasteError> {
+    let store = state.store.lock().map_err(|_| PasteError::LockPoisoned)?;
+    store.update_clip_text(&id, &text).map_err(PasteError::Store)
+}
